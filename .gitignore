@@ -1,0 +1,13 @@
+# Virtual env
+.venv/
+
+# Sample input data
+sample_data/
+
+# Local env vars
+.env
+
+# Demo output
+review_result.json
+
+
