@@ -1,14 +1,14 @@
 # PROwl – (AI PR Reviewer · Demo)
 
-AI pull request reviews demo
+AI PR Reviewer (MVP)
 
 ## Features
 
-- Loads a sample Pull Request payload
-- Fetches the PR .diff from GitHub
-- Condenses the changes into a prompt
-- Sends it to an LLM
-- Returns a normalized/structured review
+- Ingest pull request webhook payloads
+- Fetch the pull request `.diff` from GitHub
+- Condense changes and generate an LLM-ready prompt
+- Dispatch to LLM
+- Return a structured review object
 
 ## Prerequisites
 
