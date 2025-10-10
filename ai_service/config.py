@@ -5,6 +5,9 @@ load_dotenv()
 
 class Config:
     RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost/")
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+    OPENROUTER_BASE = os.getenv("OPENROUTER_BASE", "https://openrouter.ai/api/v1")
+    MODEL = os.getenv("MODEL", "deepseek/deepseek-chat-v3.1:free")
     AWS_BEARER_TOKEN_BEDROCK = os.getenv("AWS_BEARER_TOKEN_BEDROCK", "")
     AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY")
     AWS_SECRET_KEY = os.getenv("AWS_SECRET_KEY")
