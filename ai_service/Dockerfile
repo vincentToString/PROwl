@@ -19,3 +19,5 @@ COPY . /app/ai_service
 # Run the AI service worker
 CMD ["python", "-m", "ai_service.worker"]
 
+# Install boto3
+RUN pip install --no-cache-dir boto3

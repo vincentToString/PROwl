@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 import logging
 import signal
+import boto3
+import base64
 from ai_service.models import PullRequestData, ReviewResult, Finding
 from ai_service.config import Config
 
@@ -29,9 +31,10 @@ async def handle_message(message: AbstractIncomingMessage, channel):
     #         result = process_event(
     #             event_dict,
     #             prompt_path=Path(__file__).parent / "prompt.md",
-    #             model=Config.MODEL,
-    #             base_url=Config.OPENROUTER_BASE,
-    #             api_key=Config.OPENROUTER_API_KEY,
+    #             model_id=Config.MODEL_ID,
+    #             aws_access_key=Config.AWS_ACCESS_KEY,
+    #             aws_secret_key=Config.AWS_SECRET_KEY,
+    #             aws_region=Config.AWS_DEFAULT_REGION,
     #             llm_timeout=Config.LLM_TIMEOUT,
     #             max_files=Config.MAX_FILES,
     #             max_lines=Config.MAX_LINES,
@@ -56,9 +59,10 @@ async def handle_message(message: AbstractIncomingMessage, channel):
         result = process_event(
             event_dict,
             prompt_path=Path(__file__).parent / "prompt.md",
-            model=Config.MODEL,
-            base_url=Config.OPENROUTER_BASE,
-            api_key=Config.OPENROUTER_API_KEY,
+            model_id=Config.MODEL_ID,
+            aws_access_key=Config.AWS_ACCESS_KEY,
+            aws_secret_key=Config.AWS_SECRET_KEY,
+            aws_region=Config.AWS_DEFAULT_REGION,
             llm_timeout=Config.LLM_TIMEOUT,
             max_files=Config.MAX_FILES,
             max_lines=Config.MAX_LINES,
@@ -80,9 +84,10 @@ def process_event(
     event_dict: dict,
     *,
     prompt_path: Path,
-    model: str,
-    base_url: str,
-    api_key: str,
+    model_id: str,
+    aws_access_key: str,
+    aws_secret_key: str,
+    aws_region: str,
     llm_timeout: int,
     max_files: int,
     max_lines: int,
@@ -97,11 +102,12 @@ def process_event(
 
     prompt_template = load_prompt_template(prompt_path)
     prompt = render_prompt(prompt_template, event, files, snippets)
-    llm_response = call_openrouter(
+    llm_response = call_bedrock(
         prompt,
-        model=model,
-        base_url=base_url,
-        api_key=api_key,
+        model_id=model_id,
+        aws_access_key=aws_access_key,
+        aws_secret_key=aws_secret_key,
+        aws_region=aws_region,
         timeout_s=llm_timeout,
     )
 
@@ -120,7 +126,7 @@ def process_event(
             "Avoid secrets in code",
             "Add/adjust tests when behavior changes",
         ],
-        llm_meta={"provider": "openrouter", "model": model},
+        llm_meta={"provider": "aws_bedrock", "model": model_id},
     )
 
 # Helper:
@@ -220,35 +226,53 @@ def render_prompt(
         .replace("{{snippets}}", build_snippets_block(snippets))
     )
 
-def call_openrouter(
-    prompt_text: str, model: str, base_url: str, api_key: str, timeout_s: int
+def call_bedrock(
+    prompt_text: str, model_id: str, aws_access_key: str, aws_secret_key: str, aws_region: str, timeout_s: int
 ) -> dict:
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://pr-demo.local",
-        "X-Title": "AI PR Reviewer Demo",
-    }
+    # Create Bedrock client with explicit credentials
+    bedrock_client = boto3.client(
+        'bedrock-runtime',
+        region_name=aws_region,
+        aws_access_key_id=aws_access_key,
+        aws_secret_access_key=aws_secret_key
+    )
 
-    body = {
-        "model": model,
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a precise code review assistant. Return ONLY JSON.",
-            },
-            {"role": "user", "content": prompt_text},
-        ],
-    }
+    # For Llama models, use the converse API format
+    conversation = [
+        {
+            "role": "user",
+            "content": [{"text": f"You are a precise code review assistant. Return ONLY JSON.\n\n{prompt_text}"}]
+        }
+    ]
 
-    with httpx.Client(timeout=timeout_s, base_url=base_url) as client:
-        response = client.post("/chat/completions", headers=headers, json=body)
-        response.raise_for_status()
-        data = response.json()
-    content = data["choices"][0]["message"]["content"]
-    return json.loads(content)
+    try:
+        response = bedrock_client.converse(
+            modelId=model_id,
+            messages=conversation,
+            inferenceConfig={
+                "maxTokens": 4000,
+                "temperature": 0.2,
+                "topP": 0.9
+            }
+        )
+        
+        # Extract response text
+        response_text = response["output"]["message"]["content"][0]["text"]
+        
+        # Try to parse as JSON
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            # If not valid JSON, wrap in a basic structure
+            logger.warning(f"Non-JSON response from Bedrock: {response_text}")
+            return {
+                "summary": response_text,
+                "findings": []
+            }
+        
+    except Exception as e:
+        logger.error(f"Error calling Bedrock: {e}")
+        raise
 
 def build_files_table(files: list[dict]) -> str:
     return (
