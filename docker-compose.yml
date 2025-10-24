@@ -26,13 +26,17 @@ services:
     environment:
       - RABBITMQ_URL=amqp://admin:password@rabbitmq:5672/
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
-      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
+      - GITHUB_PRIVATE_KEY_PATH=/app/github-app-private-key.pem
+      - SLACK_TOKEN=${SLACK_TOKEN}
     depends_on:
       rabbitmq:
         condition: service_healthy
     restart: unless-stopped
     volumes:
       - ./intake:/app/intake
+      - ./github-app-private-key.pem:/app/github-app-private-key.pem:ro
 
   ai_service:
     build:
@@ -61,7 +65,9 @@ services:
     container_name: outbound
     environment:
       - RABBITMQ_URL=amqp://admin:password@rabbitmq:5672/
-      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
+      - GITHUB_PRIVATE_KEY_PATH=/app/github-app-private-key.pem
       - SLACK_TOKEN=${SLACK_TOKEN}
     depends_on:
       rabbitmq:
@@ -69,6 +75,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./outbound:/app/outbound
+      - ./github-app-private-key.pem:/app/github-app-private-key.pem:ro
 
 volumes:
   rabbitmq_data:
