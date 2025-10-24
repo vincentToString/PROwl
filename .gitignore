@@ -24,3 +24,7 @@ Thumbs.db
 # Project-specific
 flow.html
 doc/
+
+# Github App private key
+*.pem
+github-app-private-key.pem

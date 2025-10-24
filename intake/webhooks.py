@@ -35,7 +35,9 @@ async def handle_github_webhook(
     if webhook_data.get("action") not in ["opened", "synchronize"]:
         return {"message": f"PR action '{webhook_data.get('action')}' ignored"}
 
-    diff_content = await fetch_pr_diff(webhook_data["pull_request"]["diff_url"])
+    repo_name = webhook_data["repository"]["full_name"]
+    pr_number = webhook_data["number"]
+    diff_content = await fetch_pr_diff(repo_name, pr_number)
 
     if not diff_content:
         logger.warning(f"Proceed without diff for PR #{webhook_data['number']}")
@@ -79,27 +81,26 @@ async def handle_github_webhook(
         "action": "queued_for_processing"
     }
 
-async def fetch_pr_diff(diff_url: str, timeout: int = 30) -> str | None:
+async def fetch_pr_diff(repo: str, pr_number: int, timeout: int = 30) -> str | None:
     """fetch actual diff content"""
+    api_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
+    token = await Config.github_app_auth.get_installation_token()
     headers = {
         "Accept": "application/vnd.github.v3.diff",
+        "Authorization": f"token {token}",
         "User-Agent": "PR-Owl-Bot"
     }
 
-    if Config.GITHUB_TOKEN:
-        headers["Authorization"] = f"token {Config.GITHUB_TOKEN}"
-    
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(diff_url, headers=headers, allow_redirects=True) as response:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+            async with session.get(api_url, headers=headers) as response:
                 response.raise_for_status()
-  
                 diff = await response.text()
 
-                # MVP: 500mb limit
-                if len(diff) >500_000:
+                # MVP: 500kb limit
+                if len(diff) > 500_000:
                     logger.warning(f"Diff too large ({len(diff)} bytes), truncating")
-                    return diff[:500_000]+ "\n... [truncated]"     
+                    return diff[:500_000] + "\n... [truncated]"
                 return diff
 
     except aiohttp.ClientResponseError as e:
