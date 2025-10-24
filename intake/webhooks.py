@@ -5,6 +5,8 @@ import json
 import hmac
 import hashlib
 import logging
+import uuid
+from .redis_client import RedisClient
 from .config import Config
 from .models import PullRequestData
 import aiohttp
@@ -13,6 +15,9 @@ import asyncio
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+    
+redis_client = RedisClient(Config.REDIS_URL)
+
 
 @router.post("/webhook/github")
 async def handle_github_webhook(
@@ -41,6 +46,15 @@ async def handle_github_webhook(
 
     if not diff_content:
         logger.warning(f"Proceed without diff for PR #{webhook_data['number']}")
+        diff_content = "Diff file unable to retrieve"
+        return {"status": "error", "message": "Failed to fetch diff"}
+    
+    diff_id = str(uuid.uuid4())
+
+    success = await redis_client.store_diff(diff_id, diff_content)
+    if not success:
+        logger.error(f"Failed to store diff in Redis for {repo_name}#{pr_number}")
+        return {"status": "error", "message": "Failed to store diff"}
 
     pr_data = PullRequestData(
         action=webhook_data["action"],
@@ -53,7 +67,7 @@ async def handle_github_webhook(
         repo_name=webhook_data["repository"]["full_name"],
         repo_url=webhook_data["repository"]["html_url"],
         created_at=webhook_data["pull_request"]["created_at"],
-        pr_diff_content=diff_content
+        diff_id = diff_id
     )
     channel = await request.app.state.rabbitmq_connection.channel()
 
@@ -73,6 +87,7 @@ async def handle_github_webhook(
         logger.error(f"Failed to publish to RabbitMQ: {e}")
         raise HTTPException(status_code=503, detail="Queue Unavailable")
     finally:
+        await redis_client.close()
         await channel.close()
 
     return {

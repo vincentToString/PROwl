@@ -12,4 +12,4 @@ class PullRequestData(BaseModel):
     repo_name: str
     repo_url: str
     created_at: str
-    pr_diff_content: str | None = None
+    diff_id: str
