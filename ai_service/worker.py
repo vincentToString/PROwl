@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 import logging
 import signal
+import boto3
+import base64
 from ai_service.models import PullRequestData, ReviewResult, Finding
 from ai_service.config import Config
 
@@ -29,9 +31,10 @@ async def handle_message(message: AbstractIncomingMessage, channel):
     #         result = process_event(
     #             event_dict,
     #             prompt_path=Path(__file__).parent / "prompt.md",
-    #             model=Config.MODEL,
-    #             base_url=Config.OPENROUTER_BASE,
-    #             api_key=Config.OPENROUTER_API_KEY,
+    #             model_id=Config.MODEL_ID,
+    #             aws_access_key=Config.AWS_ACCESS_KEY,
+    #             aws_secret_key=Config.AWS_SECRET_KEY,
+    #             aws_region=Config.AWS_DEFAULT_REGION,
     #             llm_timeout=Config.LLM_TIMEOUT,
     #             max_files=Config.MAX_FILES,
     #             max_lines=Config.MAX_LINES,
@@ -56,9 +59,6 @@ async def handle_message(message: AbstractIncomingMessage, channel):
         result = process_event(
             event_dict,
             prompt_path=Path(__file__).parent / "prompt.md",
-            model=Config.MODEL,
-            base_url=Config.OPENROUTER_BASE,
-            api_key=Config.OPENROUTER_API_KEY,
             llm_timeout=Config.LLM_TIMEOUT,
             max_files=Config.MAX_FILES,
             max_lines=Config.MAX_LINES,
@@ -80,9 +80,6 @@ def process_event(
     event_dict: dict,
     *,
     prompt_path: Path,
-    model: str,
-    base_url: str,
-    api_key: str,
     llm_timeout: int,
     max_files: int,
     max_lines: int,
@@ -97,13 +94,48 @@ def process_event(
 
     prompt_template = load_prompt_template(prompt_path)
     prompt = render_prompt(prompt_template, event, files, snippets)
-    llm_response = call_openrouter(
-        prompt,
-        model=model,
-        base_url=base_url,
-        api_key=api_key,
-        timeout_s=llm_timeout,
-    )
+    
+    # Try AWS Bedrock first, fallback to OpenRouter if it fails
+    llm_response = None
+    provider_used = "unknown"
+    model_used = "unknown"
+    
+    # Attempt AWS Bedrock first if credentials are available
+    if Config.AWS_ACCESS_KEY and Config.AWS_SECRET_KEY:
+        try:
+            llm_response = call_bedrock(
+                prompt,
+                model_id=Config.MODEL_ID,
+                aws_access_key=Config.AWS_ACCESS_KEY,
+                aws_secret_key=Config.AWS_SECRET_KEY,
+                aws_region=Config.AWS_DEFAULT_REGION,
+                timeout_s=llm_timeout,
+            )
+            provider_used = "aws_bedrock"
+            model_used = Config.MODEL_ID
+            logger.info("Successfully used AWS Bedrock for LLM call")
+        except Exception as e:
+            logger.warning(f"AWS Bedrock failed: {e}, falling back to OpenRouter")
+    
+    # Fallback to OpenRouter if Bedrock failed or no AWS credentials
+    if llm_response is None:
+        if Config.OPENROUTER_API_KEY:
+            try:
+                llm_response = call_openrouter(
+                    prompt,
+                    model=Config.MODEL,
+                    base_url=Config.OPENROUTER_BASE,
+                    api_key=Config.OPENROUTER_API_KEY,
+                    timeout_s=llm_timeout,
+                )
+                provider_used = "openrouter"
+                model_used = Config.MODEL
+                logger.info("Successfully used OpenRouter for LLM call")
+            except Exception as e:
+                logger.error(f"OpenRouter also failed: {e}")
+                raise Exception("Both AWS Bedrock and OpenRouter failed")
+        else:
+            raise Exception("No LLM provider available: missing both AWS and OpenRouter credentials")
 
     findings = [
         Finding.model_validate(finding)
@@ -120,7 +152,7 @@ def process_event(
             "Avoid secrets in code",
             "Add/adjust tests when behavior changes",
         ],
-        llm_meta={"provider": "openrouter", "model": model},
+        llm_meta={"provider": provider_used, "model": model_used},
     )
 
 # Helper:
@@ -249,6 +281,51 @@ def call_openrouter(
         data = response.json()
     content = data["choices"][0]["message"]["content"]
     return json.loads(content)
+
+def call_bedrock(
+    prompt_text: str, model_id: str, aws_access_key: str, aws_secret_key: str, aws_region: str, timeout_s: int
+) -> dict:
+    # Create Bedrock client with explicit credentials
+    bedrock_client = boto3.client(
+        'bedrock-runtime',
+        region_name=aws_region,
+        aws_access_key_id=aws_access_key,
+        aws_secret_access_key=aws_secret_key
+    )
+    conversation = [
+        {
+            "role": "user",
+            "content": [{"text": f"You are a precise code review assistant. Return ONLY JSON.\n\n{prompt_text}"}]
+        }
+    ]
+    try:
+        response = bedrock_client.converse(
+            modelId=model_id,
+            messages=conversation,
+            inferenceConfig={
+                "maxTokens": 4000,
+                "temperature": 0.2,
+                "topP": 0.9
+            }
+        )
+        
+        # Extract response text
+        response_text = response["output"]["message"]["content"][0]["text"]
+        
+        # Try to parse as JSON
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            # If not valid JSON, wrap in a basic structure
+            logger.warning(f"Non-JSON response from Bedrock: {response_text}")
+            return {
+                "summary": response_text,
+                "findings": []
+            }
+        
+    except Exception as e:
+        logger.error(f"Error calling Bedrock: {e}")
+        raise
 
 def build_files_table(files: list[dict]) -> str:
     return (
