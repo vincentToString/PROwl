@@ -9,6 +9,7 @@ class Config:
     OPENROUTER_BASE = os.getenv("OPENROUTER_BASE", "https://openrouter.ai/api/v1")
     MODEL = os.getenv("MODEL", "deepseek/deepseek-chat-v3.1:free")
     AWS_BEARER_TOKEN_BEDROCK = os.getenv("AWS_BEARER_TOKEN_BEDROCK", "")
+    KNOWLEDGE_BASE_ID = os.getenv("KNOWLEDGE_BASE_ID")
     AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY")
     AWS_SECRET_KEY = os.getenv("AWS_SECRET_KEY")
     MODEL_ID = os.getenv("MODEL_ID", "meta.llama4-scout-17b-instruct-v1:0")

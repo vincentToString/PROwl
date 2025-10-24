@@ -39,11 +39,14 @@ services:
       context: ./ai_service
       dockerfile: Dockerfile
     container_name: ai_service
+    env_file:
+      - .env
     environment:
       - RABBITMQ_URL=amqp://admin:password@rabbitmq:5672/
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - OPENROUTER_BASE=${OPENROUTER_BASE:-https://openrouter.ai/api/v1}
-      - MODEL=${MODEL:-deepseek/deepseek-chat-v3.1:free}
+      - AWS_ACCESS_KEY=${AWS_ACCESS_KEY}
+      - AWS_SECRET_KEY=${AWS_SECRET_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-2}
+      - MODEL_ID=${MODEL_ID:-arn:aws:bedrock:us-east-2:516647891652:inference-profile/us.meta.llama4-scout-17b-instruct-v1:0}
       - LLM_TIMEOUT=${LLM_TIMEOUT:-20}
       - MAX_FILES_FOR_SNIPPETS=${MAX_FILES_FOR_SNIPPETS:-3}
       - MAX_LINES_PER_FILE=${MAX_LINES_PER_FILE:-120}
@@ -53,6 +56,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./ai_service:/app/ai_service
+      - ./.env:/app/.env:ro
 
   outbound:
     build:

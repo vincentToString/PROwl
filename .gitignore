@@ -24,3 +24,9 @@ Thumbs.db
 # Project-specific
 flow.html
 doc/
+
+# test jupyter
+docker-compose.jupyter.yml
+ai_service/.ipynb_checkpoints/
+ai_service/README_JUPYTER.md
+ai_service/0_how_to_create_index_and_ingest_documents_in_knowledge_base.ipynb

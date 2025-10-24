@@ -11,10 +11,13 @@ from pydantic import BaseModel, Field
 import logging
 import signal
 import boto3
+from botocore.exceptions import ClientError
 import base64
 from ai_service.models import PullRequestData, ReviewResult, Finding
 from ai_service.config import Config
-
+import warnings
+warnings.filterwarnings('ignore')
+from ai_service.utility import create_bedrock_execution_role, create_oss_policy_attach_bedrock_execution_role, create_policies_in_oss, interactive_sleep
 
 
 logging.basicConfig(
@@ -99,8 +102,29 @@ def process_event(
     llm_response = None
     provider_used = "unknown"
     model_used = "unknown"
-    
+
+
     # Attempt AWS Bedrock first if credentials are available
+    if Config.AWS_ACCESS_KEY and Config.AWS_SECRET_KEY:
+        try:
+            # TODO: augment prompt with retrieval results from KB 
+            ## KB was set up through 0.ipynb
+            
+            llm_response = call_bedrock_base_rag(
+                prompt,
+                model_id=Config.MODEL_ID,
+                kb_id=Config.KNOWLEDGE_BASE_ID,
+                aws_access_key=Config.AWS_ACCESS_KEY,
+                aws_secret_key=Config.AWS_SECRET_KEY,
+                aws_region=Config.AWS_DEFAULT_REGION,
+                timeout_s=llm_timeout,
+            )
+            provider_used = "aws_bedrock_rag"
+            model_used = Config.MODEL_ID
+            logger.info("Successfully used AWS Bedrock RAG for LLM call")
+        except Exception as e:
+            logger.warning(f"AWS Bedrock RAG failed: {e}, falling back to Bedrock Agent")
+    
     if Config.AWS_ACCESS_KEY and Config.AWS_SECRET_KEY:
         try:
             llm_response = call_bedrock(
@@ -325,6 +349,56 @@ def call_bedrock(
         
     except Exception as e:
         logger.error(f"Error calling Bedrock: {e}")
+        raise
+
+def call_bedrock_base_rag(
+    prompt_text: str, model_id: str, kb_id: str, aws_access_key: str, aws_secret_key: str, aws_region: str, timeout_s: int
+) -> dict:
+    # Create Bedrock client with explicit credentials that can handle invocations of AI agents and flows, and querying knowledge bases
+    bedrock_client = boto3.client(
+        'bedrock-agent-runtime',
+        region_name=aws_region,
+        aws_access_key_id=aws_access_key,
+        aws_secret_access_key=aws_secret_key
+    )
+    try:
+        response = bedrock_client.retrieve_and_generate(
+            input={
+                    'text': f"You are a precise code review assistant. Return ONLY JSON.\n\n{prompt_text}"
+            },
+            retrieveAndGenerateConfiguration={
+                'type': 'KNOWLEDGE_BASE',
+                'knowledgeBaseConfiguration': {
+                    'knowledgeBaseId': kb_id,
+                    'modelArn': model_id
+                }
+            },
+        )
+        
+        # Extract response text
+        response_text = response["output"]["text"]
+
+        ## Reference 
+        citations = response["citations"]
+        contexts = []
+        for citation in citations:
+            retrieved_References = citation["retrievedReferences"]
+            for reference in retrieved_References:
+                contexts.append(reference["content"]["text"])
+
+        # Try to parse as JSON
+        try:
+            json.loads(response_text)
+        except json.JSONDecodeError:
+            # If not valid JSON, wrap in a basic structure
+            logger.warning(f"Non-JSON response from Bedrock RAG: {response_text}")
+            return {
+                "summary": response_text,
+                "findings": contexts
+            }
+        
+    except Exception as e:
+        logger.error(f"Error calling Bedrock RAG: {e}")
         raise
 
 def build_files_table(files: list[dict]) -> str:

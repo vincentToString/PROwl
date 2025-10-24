@@ -13,7 +13,7 @@ from pathlib import Path
 import json
 
 from ai_service.config import Config
-from ai_service.worker import call_bedrock, load_prompt_template, render_prompt, parse_diff
+from ai_service.worker import call_bedrock, call_bedrock_base_rag, load_prompt_template, render_prompt, parse_diff
 
 
 @pytest.mark.expensive
@@ -22,7 +22,179 @@ class TestRealAPIIntegration:
     Tests that require real AWS API calls - THESE COST MONEY!
     Only run when you need to validate the actual integration.
     """
-    
+    def test_real_bedrock_rag_with_prompt(self):
+        """
+        Test real AWS Bedrock with Knowledge Base and Retrieval API call using the actual prompt template
+        WARNING: This will make a real API call and cost money!
+        """
+
+        # Check if we have real AWS credentials configured
+        if not Config.AWS_ACCESS_KEY or not Config.AWS_SECRET_KEY:
+            pytest.skip("AWS credentials not configured - skipping real API test")
+
+        if not Config.MODEL_ID or not Config.MODEL_ID.startswith("arn:aws:bedrock:"):
+            pytest.skip("AWS Bedrock model not configured - skipping real API test")
+
+        if not Config.KNOWLEDGE_BASE_ID:
+            pytest.skip("KNOWLEDGE_BASE_ID not configured - skipping RAG test")
+
+        # RAG queries should be focused questions, not full prompts
+        # The Knowledge Base is designed to answer specific questions about documents
+        rag_query = """If I want to update telephone information, which api should I call?"""
+
+#         # Load the actual prompt template (THIS CAN"T WORK WITH THE AGENT QUERY FOR TOO LONG!)
+#         prompt_path = Path(__file__).parent.parent / "prompt.md"
+#         if not prompt_path.exists():
+#             pytest.skip(f"Prompt template not found at {prompt_path} - skipping test")
+        
+#         prompt_template = load_prompt_template(prompt_path)
+        
+#         # Create sample PR data for testing
+#         sample_pr_data = {
+#             "repo_name": "test/sample-repo",
+#             "pr_number": 42,
+#             "pr_title": "Update information about a specific telephone in inventory", 
+#             "pr_author": "developer123",
+#             "pr_body": "This PR updates information about a specific telephone in inventory by calling API",
+#             "pr_url": "https://github.com/test/sample-repo/pull/42"
+#         }
+        
+#         # Sample diff content for testing
+#         sample_diff = """diff --git a/telephones.py b/telephones.py
+# index 1111111..2222222 100644
+# --- a/telephones.py
+# +++ b/telephones.py
+# @@ -1,5 +1,40 @@
+# +import json
+# +import requests
+# +
+# +BASE_URL = "https://api.example.com/v1"
+# + 
+# +def update_telephone_info(telephone_id: str, phone_number: str) -> dict:
+# +    url = f"{BASE_URL}/telephone/update"
+# +
+# +    payload = {
+# +        "telephoneId": telephone_id,
+# +        "newNumber": phone_number
+# +    }
+# +
+# +    try:
+# +        resp = requests.get(
+# +            url,
+# +            params={"id": telephone_id},
+# +            data=str(payload),
+# +            headers={
+# +                "Content-Type": "text/plain"
+# +            },
+# +            timeout=3
+# +        )
+# +        return resp.json()
+# +    except Exception:
+# +        return {"status": "ok", "id": telephone_id, "number": phone_number}
+# +
+# +
+# +def update_many(telephones):
+# +    results = []
+# +    for t in telephones:
+# +        res = update_telephone_info(t["id"], t["phone"])
+# +        results.append(res)
+# +    return {"updated": results}
+# +
+#  def placeholder():
+#      # existing code
+#      return True"""
+        
+#         # Parse the diff (simulate what happens in the worker)
+#         files, snippets = parse_diff(sample_diff, max_files=3, max_lines_per_file=120)
+        
+#         # Create a mock event object
+#         class MockEvent:
+#             def __init__(self, data):
+#                 for key, value in data.items():
+#                     setattr(self, key, value)
+        
+#         mock_event = MockEvent(sample_pr_data)
+        
+#         # Render the prompt with real data
+#         rag_query = render_prompt(prompt_template, mock_event, files, snippets)
+
+        print(f"\n{'='*60}")
+        print("REAL API TEST - AWS BEDROCK RAG INTEGRATION")
+        print(f"{'='*60}")
+        print(f"Model: {Config.MODEL_ID}")
+        print(f"Region: {Config.AWS_DEFAULT_REGION}")
+        print(f"Knowledge Base ID: {Config.KNOWLEDGE_BASE_ID}")
+        print(f"Access Key: {Config.AWS_ACCESS_KEY[:10]}...")
+        print(f"{'='*60}")
+        print("RAG QUERY:")
+        print(f"{'='*60}")
+        print(rag_query)
+        print(f"{'='*60}")
+
+        # Make the real RAG API call
+        print("Making REAL AWS Bedrock RAG API call...")
+        print("WARNING: This will cost money AND query your Knowledge Base!")
+
+        try:
+            result = call_bedrock_base_rag(
+                prompt_text=rag_query,
+                model_id=Config.MODEL_ID,
+                kb_id=Config.KNOWLEDGE_BASE_ID,
+                aws_access_key=Config.AWS_ACCESS_KEY,
+                aws_secret_key=Config.AWS_SECRET_KEY,
+                aws_region=Config.AWS_DEFAULT_REGION,
+                timeout_s=Config.LLM_TIMEOUT
+            )
+
+            print(f"{'='*60}")
+            print("BEDROCK RAG RESPONSE RECEIVED!")
+            print(f"{'='*60}")
+            print("Raw Response:")
+            print(json.dumps(result, indent=2))
+            print(f"{'='*60}")
+
+            # Validate the response structure
+            assert isinstance(result, dict), "Response should be a dictionary"
+            assert "summary" in result, "Response should contain 'summary' field"
+            assert "findings" in result, "Response should contain 'findings' field"
+
+            # Validate response content
+            summary = result.get("summary", "")
+            print(f"Summary length: {len(summary)} characters")
+            print(f"Summary preview: {summary}...")
+            print(f"{'='*60}")
+
+            # Check that we got a substantial response
+            assert len(summary) > 50, f"Summary should be > 50 characters, got {len(summary)}"
+
+            # Validate findings structure
+            findings = result.get("findings", [])
+            print(f"Number of findings: {len(findings)}")
+
+            if findings:
+                print("Sample finding:")
+                print(json.dumps(findings[0], indent=2))
+
+            print(f"{'='*60}")
+            print("REAL RAG API TEST COMPLETED SUCCESSFULLY!")
+            print("Cost incurred: Real AWS Bedrock RAG API call made")
+            print(f"Knowledge Base queried: {Config.KNOWLEDGE_BASE_ID}")
+            print(f"{'='*60}")
+
+            # Assert test passed
+            assert True, "Real RAG API integration test completed successfully"
+
+        except Exception as e:
+            print(f"{'='*60}")
+            print("REAL RAG API TEST FAILED!")
+            print(f"Error: {str(e)}")
+            print(f"Error type: {type(e).__name__}")
+            print(f"{'='*60}")
+            raise
+
+
+
+
     def test_real_bedrock_with_prompt_template(self):
         """
         Test real AWS Bedrock API call using the actual prompt template
@@ -47,36 +219,56 @@ class TestRealAPIIntegration:
         sample_pr_data = {
             "repo_name": "test/sample-repo",
             "pr_number": 42,
-            "pr_title": "Add new feature for user authentication", 
+            "pr_title": "Update information about a specific telephone in inventory", 
             "pr_author": "developer123",
-            "pr_body": "This PR adds JWT-based authentication to the application with proper error handling and tests.",
+            "pr_body": "This PR updates information about a specific telephone in inventory by calling API",
             "pr_url": "https://github.com/test/sample-repo/pull/42"
         }
         
         # Sample diff content for testing
-        sample_diff = """diff --git a/auth.py b/auth.py
-index 1234567..abcdefg 100644
---- a/auth.py
-+++ b/auth.py
-@@ -1,5 +1,15 @@
-+import jwt
-+from datetime import datetime, timedelta
+        sample_diff = """diff --git a/telephones.py b/telephones.py
+index 1111111..2222222 100644
+--- a/telephones.py
++++ b/telephones.py
+@@ -1,5 +1,40 @@
++import json
++import requests
 +
- def authenticate_user(username, password):
--    # TODO: Implement authentication
--    return False
-+    if verify_credentials(username, password):
-+        token = jwt.encode({
-+            'user': username,
-+            'exp': datetime.utcnow() + timedelta(hours=24)
-+        }, SECRET_KEY, algorithm='HS256')
-+        return token
-+    return None
++BASE_URL = "https://api.example.com/v1"
++ 
++def update_telephone_info(telephone_id: str, phone_number: str) -> dict:
++    url = f"{BASE_URL}/telephone/update"
 +
-+def verify_credentials(username, password):
-+    # Database lookup logic here
-+    return username == "admin" and password == "secret123"
-"""
++    payload = {
++        "telephoneId": telephone_id,
++        "newNumber": phone_number
++    }
++
++    try:
++        resp = requests.get(
++            url,
++            params={"id": telephone_id},
++            data=str(payload),
++            headers={
++                "Content-Type": "text/plain"
++            },
++            timeout=3
++        )
++        return resp.json()
++    except Exception:
++        return {"status": "ok", "id": telephone_id, "number": phone_number}
++
++
++def update_many(telephones, token: str):
++    results = []
++    for t in telephones:
++        res = update_telephone_info(t["id"], t["phone"], token)
++        results.append(res)
++    return {"updated": results}
++
+ def placeholder():
+     # existing code
+     return True"""
         
         # Parse the diff (simulate what happens in the worker)
         files, snippets = parse_diff(sample_diff, max_files=3, max_lines_per_file=120)
