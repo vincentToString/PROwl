@@ -21,184 +21,6 @@ A RAG (Retrieval-Augmented Generation) service with a Knowledge Graph Index engi
   - Relationship traversal
   - Document graph visualization
 
-## Architecture
-
-```
-Document → Chunking → Entity Extraction → Relation Extraction → Storage
-                                                                     ↓
-Query → Embedding → Similarity Search → Entity Match → Results
-```
-
-## API Endpoints
-
-### Health Check
-```
-GET /health
-```
-
-### Ingest Document
-```
-POST /api/v1/kg-index/ingest
-Content-Type: application/json
-
-{
-  "document_id": "doc-123",
-  "content": "Your document content here...",
-  "title": "Document Title",
-  "metadata": {
-    "author": "John Doe",
-    "tags": ["tech", "ai"]
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "document_id": "doc-123",
-  "chunks_created": 5,
-  "entities_created": 12,
-  "relations_created": 8,
-  "duration_seconds": 3.45,
-  "status": "success"
-}
-```
-
-### Query Knowledge Graph
-```
-POST /api/v1/kg-index/query
-Content-Type: application/json
-
-{
-  "query": "What is machine learning?",
-  "top_k": 5,
-  "include_relations": true
-}
-```
-
-**Response:**
-```json
-{
-  "query": "What is machine learning?",
-  "chunks": [
-    {
-      "chunk_id": "doc-123_chunk_0",
-      "content": "Machine learning is...",
-      "score": 0.89,
-      "document_id": "doc-123"
-    }
-  ],
-  "entities": [
-    {
-      "entity_id": "uuid-here",
-      "text": "Machine Learning",
-      "type": "CONCEPT",
-      "metadata": {}
-    }
-  ],
-  "relations": [
-    {
-      "relation_id": "uuid-here",
-      "source": "Machine Learning",
-      "target": "Artificial Intelligence",
-      "type": "PART_OF",
-      "confidence": 0.8
-    }
-  ]
-}
-```
-
-### Get Document Graph
-```
-GET /api/v1/kg-index/document/{document_id}
-```
-
-**Response:**
-```json
-{
-  "document_id": "doc-123",
-  "title": "Document Title",
-  "metadata": {},
-  "entities": [...],
-  "relations": [...],
-  "chunks_count": 5
-}
-```
-
-## Configuration
-
-Environment variables (set in `.env` or `docker-compose.yml`):
-
-- `POSTGRES_HOST`: PostgreSQL host (default: localhost)
-- `POSTGRES_PORT`: PostgreSQL port (default: 5432)
-- `POSTGRES_USER`: Database user
-- `POSTGRES_PASSWORD`: Database password
-- `POSTGRES_DB`: Database name
-- `OPENROUTER_API_KEY`: API key for LLM services
-- `OPENROUTER_BASE`: Base URL for OpenRouter API
-- `EMBEDDING_MODEL`: Model for embeddings
-- `SERVICE_HOST`: Service host (default: 0.0.0.0)
-- `SERVICE_PORT`: Service port (default: 8002)
-- `KG_CHUNK_SIZE`: Text chunk size (default: 512)
-- `KG_CHUNK_OVERLAP`: Chunk overlap (default: 50)
-- `KG_MAX_ENTITIES_PER_CHUNK`: Max entities per chunk (default: 10)
-
-## Running with Docker
-
-```bash
-# Build and start the service
-docker-compose up -d rag_service
-
-# View logs
-docker-compose logs -f rag_service
-
-# Stop the service
-docker-compose down
-```
-
-## Running Locally
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Download spaCy model
-python -m spacy download en_core_web_sm
-
-# Set environment variables
-export POSTGRES_HOST=localhost
-export POSTGRES_USER=prowl_user
-export POSTGRES_PASSWORD=prowl_password
-export POSTGRES_DB=prowl_db
-export OPENROUTER_API_KEY=your-api-key
-
-# Run the service
-python main.py
-```
-
-The service will be available at `http://localhost:8002`
-
-## Database Schema
-
-### Tables
-
-1. **kg_documents**: Stores document metadata
-2. **kg_chunks**: Text chunks with embeddings
-3. **kg_entities**: Extracted entities (persons, concepts, etc.)
-4. **kg_relations**: Relationships between entities
-
-### Relationships
-
-- Documents → Chunks (one-to-many)
-- Chunks → Entities (one-to-many)
-- Entities → Relations (many-to-many through relations table)
-
-## Using the Knowledge Graph Index Programmatically
-
-### Direct Integration with LlamaIndex
-
-The Knowledge Graph Index Engine is built on **LlamaIndex** and can be used directly in your Python code for more advanced use cases:
-
 #### 1. Basic Usage from Another Service
 
 ```python
@@ -403,6 +225,170 @@ async def ask_question(question: str, document_id: str):
                 top_k=5
             )
 ```
+
+## API Endpoints
+
+### Health Check
+```
+GET /health
+```
+
+### Ingest Document
+```
+POST /api/v1/kg-index/ingest
+Content-Type: application/json
+
+{
+  "document_id": "doc-123",
+  "content": "Your document content here...",
+  "title": "Document Title",
+  "metadata": {
+    "author": "John Doe",
+    "tags": ["tech", "ai"]
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "document_id": "doc-123",
+  "chunks_created": 5,
+  "entities_created": 12,
+  "relations_created": 8,
+  "duration_seconds": 3.45,
+  "status": "success"
+}
+```
+
+### Query Knowledge Graph
+```
+POST /api/v1/kg-index/query
+Content-Type: application/json
+
+{
+  "query": "What is machine learning?",
+  "top_k": 5,
+  "include_relations": true
+}
+```
+
+**Response:**
+```json
+{
+  "query": "What is machine learning?",
+  "chunks": [
+    {
+      "chunk_id": "doc-123_chunk_0",
+      "content": "Machine learning is...",
+      "score": 0.89,
+      "document_id": "doc-123"
+    }
+  ],
+  "entities": [
+    {
+      "entity_id": "uuid-here",
+      "text": "Machine Learning",
+      "type": "CONCEPT",
+      "metadata": {}
+    }
+  ],
+  "relations": [
+    {
+      "relation_id": "uuid-here",
+      "source": "Machine Learning",
+      "target": "Artificial Intelligence",
+      "type": "PART_OF",
+      "confidence": 0.8
+    }
+  ]
+}
+```
+
+### Get Document Graph
+```
+GET /api/v1/kg-index/document/{document_id}
+```
+
+**Response:**
+```json
+{
+  "document_id": "doc-123",
+  "title": "Document Title",
+  "metadata": {},
+  "entities": [...],
+  "relations": [...],
+  "chunks_count": 5
+}
+```
+
+## Configuration
+
+Environment variables (set in `.env` or `docker-compose.yml`):
+
+- `POSTGRES_HOST`: PostgreSQL host (default: localhost)
+- `POSTGRES_PORT`: PostgreSQL port (default: 5432)
+- `POSTGRES_USER`: Database user
+- `POSTGRES_PASSWORD`: Database password
+- `POSTGRES_DB`: Database name
+- `OPENROUTER_API_KEY`: API key for LLM services
+- `OPENROUTER_BASE`: Base URL for OpenRouter API
+- `EMBEDDING_MODEL`: Model for embeddings
+- `SERVICE_HOST`: Service host (default: 0.0.0.0)
+- `SERVICE_PORT`: Service port (default: 8002)
+- `KG_CHUNK_SIZE`: Text chunk size (default: 512)
+- `KG_CHUNK_OVERLAP`: Chunk overlap (default: 50)
+- `KG_MAX_ENTITIES_PER_CHUNK`: Max entities per chunk (default: 10)
+
+## Running with Docker
+
+```bash
+# Build and start the service
+docker-compose up -d rag_service
+
+# View logs
+docker-compose logs -f rag_service
+
+# Stop the service
+docker-compose down
+```
+
+## Running Locally
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Download spaCy model
+python -m spacy download en_core_web_sm
+
+# Set environment variables
+export POSTGRES_HOST=localhost
+export POSTGRES_USER=prowl_user
+export POSTGRES_PASSWORD=prowl_password
+export POSTGRES_DB=prowl_db
+export OPENROUTER_API_KEY=your-api-key
+
+# Run the service
+python main.py
+```
+
+The service will be available at `http://localhost:8002`
+
+## Database Schema
+
+### Tables
+
+1. **kg_documents**: Stores document metadata
+2. **kg_chunks**: Text chunks with embeddings
+3. **kg_entities**: Extracted entities (persons, concepts, etc.)
+4. **kg_relations**: Relationships between entities
+
+### Relationships
+
+- Documents → Chunks (one-to-many)
+- Chunks → Entities (one-to-many)
+- Entities → Relations (many-to-many through relations table)
 
 ## Future Enhancements
 
