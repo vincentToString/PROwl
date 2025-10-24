@@ -1,4 +1,22 @@
 services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: prowl_user
+      POSTGRES_PASSWORD: prowl_password
+      POSTGRES_DB: prowl_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prowl_user -d prowl_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   rabbitmq:
     image: rabbitmq:3-management
     container_name: rabbitmq
@@ -45,6 +63,11 @@ services:
     container_name: ai_service
     environment:
       - RABBITMQ_URL=amqp://admin:password@rabbitmq:5672/
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=prowl_user
+      - POSTGRES_PASSWORD=prowl_password
+      - POSTGRES_DB=prowl_db
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - OPENROUTER_BASE=${OPENROUTER_BASE:-https://openrouter.ai/api/v1}
       - MODEL=${MODEL:-deepseek/deepseek-chat-v3.1:free}
@@ -53,6 +76,8 @@ services:
       - MAX_LINES_PER_FILE=${MAX_LINES_PER_FILE:-120}
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     restart: unless-stopped
     volumes:
@@ -77,5 +102,37 @@ services:
       - ./outbound:/app/outbound
       - ./github-app-private-key.pem:/app/github-app-private-key.pem:ro
 
+  rag_service:
+    build:
+      context: ./rag_service
+      dockerfile: Dockerfile
+    container_name: rag_service
+    ports:
+      - "8002:8002"
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=prowl_user
+      - POSTGRES_PASSWORD=prowl_password
+      - POSTGRES_DB=prowl_db
+      - RABBITMQ_URL=amqp://admin:password@rabbitmq:5672/
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_BASE=${OPENROUTER_BASE:-https://openrouter.ai/api/v1}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
+      - SERVICE_HOST=0.0.0.0
+      - SERVICE_PORT=8002
+      - KG_CHUNK_SIZE=${KG_CHUNK_SIZE:-512}
+      - KG_CHUNK_OVERLAP=${KG_CHUNK_OVERLAP:-50}
+      - KG_MAX_ENTITIES_PER_CHUNK=${KG_MAX_ENTITIES_PER_CHUNK:-10}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - ./rag_service:/app/rag_service
+
 volumes:
+  postgres_data:
   rabbitmq_data:
