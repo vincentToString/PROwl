@@ -12,6 +12,108 @@ import aiohttp
 import jwt
 from dotenv import load_dotenv
 
+# Formatting helper functions (no dependencies on ai_service)
+def format_finding_markdown(finding: dict) -> str:
+    """Format a single finding as markdown for GitHub comments."""
+    severity_emoji = {
+        "critical": "🔴",
+        "high": "🟠",
+        "medium": "🟡",
+        "low": "🔵",
+        "info": "ℹ️"
+    }
+    severity = finding.get("severity", "").lower()
+    emoji = severity_emoji.get(severity, "⚠️")
+
+    markdown = f"### {emoji} {severity.upper()}: {finding.get('title', 'N/A')}\n\n"
+    markdown += f"{finding.get('details', '')}\n\n"
+
+    if finding.get("file"):
+        location = f"`{finding['file']}`"
+        if finding.get("line"):
+            location += f" (Line {finding['line']})"
+        markdown += f"**Location:** {location}\n"
+
+    return markdown
+
+
+def format_github_comment(data: dict) -> str:
+    """Format review result as a comprehensive GitHub comment."""
+    lines = []
+
+    # Header
+    lines.append("# 🦉 PROwl Code Review")
+    lines.append(f"**Review ID:** `{data.get('review_id', 'N/A')}`")
+    lines.append("")
+
+    # Summary section
+    lines.append("## 📋 Summary")
+    lines.append(data.get("summary", "No summary available"))
+    lines.append("")
+
+    # Findings section
+    findings = data.get("findings", [])
+    if findings:
+        # Group findings by severity
+        severity_order = ["critical", "high", "medium", "low", "info"]
+        findings_by_severity = {}
+        for finding in findings:
+            sev = finding.get("severity", "").lower()
+            if sev not in findings_by_severity:
+                findings_by_severity[sev] = []
+            findings_by_severity[sev].append(finding)
+
+        lines.append("## 🔍 Findings")
+        lines.append("")
+
+        total = len(findings)
+        severity_counts = {sev: len(findings_by_severity.get(sev, [])) for sev in severity_order}
+        lines.append(f"**Total Issues Found:** {total}")
+
+        # Show severity breakdown
+        breakdown = " | ".join([f"{sev.capitalize()}: {count}" for sev, count in severity_counts.items() if count > 0])
+        lines.append(f"**Breakdown:** {breakdown}")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+        # Output findings grouped by severity
+        for severity in severity_order:
+            if severity in findings_by_severity:
+                for finding in findings_by_severity[severity]:
+                    lines.append(format_finding_markdown(finding))
+                    lines.append("---")
+                    lines.append("")
+    else:
+        lines.append("## ✅ No Issues Found")
+        lines.append("Great job! No significant issues were detected in this PR.")
+        lines.append("")
+
+    # Guidelines section
+    guideline_refs = data.get("guideline_references", [])
+    if guideline_refs:
+        lines.append("## 📚 Guideline References")
+        for guideline in guideline_refs:
+            lines.append(f"- {guideline}")
+        lines.append("")
+
+    # Metadata footer
+    llm_meta = data.get("llm_meta", {})
+    if llm_meta:
+        lines.append("<details>")
+        lines.append("<summary>🤖 Review Metadata</summary>")
+        lines.append("")
+        lines.append("```json")
+        lines.append(json.dumps(llm_meta, indent=2))
+        lines.append("```")
+        lines.append("</details>")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("*Automated review powered by PROwl 🦉*")
+
+    return "\n".join(lines)
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -96,13 +198,16 @@ async def handle_github(msg: AbstractIncomingMessage):
     async with msg.process(ignore_processed=True):  # auto-ack on success
         try:
             data = json.loads(msg.body.decode("utf-8"))
-            repo = data["repo_name"]
-            pr = data["pr_number"]
 
-            # Prefer review_text, fallback to summary
-            review_body = data.get("review_text") or data.get("summary") or "[no review text]"
+            # No dependency on ai_service models - work directly with dict
+            repo = data.get("repo_name")
+            pr = data.get("pr_number")
 
-            log.info(f"Posting review to GitHub PR#{pr} in {repo}:\n{review_body[:200]}...")
+            # Use standalone formatting function
+            review_body = format_github_comment(data)
+
+            log.info(f"Posting formatted review to GitHub PR#{pr} in {repo}")
+            log.debug(f"Review preview:\n{review_body[:500]}...")
 
             # Get fresh installation token
             token = await github_auth.get_installation_token()
@@ -119,6 +224,8 @@ async def handle_github(msg: AbstractIncomingMessage):
                 if resp.status != 201:
                     text = await resp.text()
                     log.error(f"GitHub API error {resp.status}: {text}")
+                else:
+                    log.info(f"Successfully posted review comment to PR#{pr}")
 
         except Exception as e:
             log.error("Failed to handle GitHub message: %s", e, exc_info=True)

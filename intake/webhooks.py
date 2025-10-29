@@ -49,7 +49,7 @@ async def handle_github_webhook(
         diff_content = "Diff file unable to retrieve"
         return {"status": "error", "message": "Failed to fetch diff"}
     
-    diff_id = str(uuid.uuid4())
+    diff_id =  str(uuid.uuid4())
 
     success = await redis_client.store_diff(diff_id, diff_content)
     if not success:

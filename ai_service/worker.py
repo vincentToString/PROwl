@@ -12,6 +12,8 @@ import logging
 import signal
 from ai_service.models import PullRequestData, ReviewResult, Finding
 from ai_service.config import Config
+from ai_service.redis_client import RedisClient
+
 
 
 
@@ -21,37 +23,28 @@ logging.basicConfig(
   )
 logger = logging.getLogger(__name__)
 
-async def handle_message(message: AbstractIncomingMessage, channel):
-    # async with message.process(requeue=False): # manual ack
-    #     try:
-    #         event_dict = json.loads(message.body.decode("utf-8"))
+redis_client = RedisClient(Config.REDIS_URL)
 
-    #         result = process_event(
-    #             event_dict,
-    #             prompt_path=Path(__file__).parent / "prompt.md",
-    #             model=Config.MODEL,
-    #             base_url=Config.OPENROUTER_BASE,
-    #             api_key=Config.OPENROUTER_API_KEY,
-    #             llm_timeout=Config.LLM_TIMEOUT,
-    #             max_files=Config.MAX_FILES,
-    #             max_lines=Config.MAX_LINES,
-    #         )
-    #         out_exchange = await channel.get_exchange("out_exchange")
-    #         msg=Message(
-    #             body=orjson.dumps(result.model_dump()),
-    #             delivery_mode=DeliveryMode.PERSISTENT,
-    #             content_type="application/json", 
-    #             headers={"repo": result.repo_name, "pr_number": result.pr_number},
-    #         )
-    #         await out_exchange.publish(msg, routing_key="")
-    #         logger.info("Published review result for %s PR#%s", result.repo_name, result.pr_number)
-    #     except Exception as e:
-    #         logger.error("Error processing message: %s", e, exc_info=True)
-    #         # MVP: nack it (later customizable)
-    #         await message.nack(requeue=False)
-    
+async def handle_message(message: AbstractIncomingMessage, channel):
     async with message.process(requeue=False): # manual ack
         event_dict = json.loads(message.body.decode("utf-8"))
+
+        diff_id = event_dict.get("diff_id")
+
+        if diff_id:
+            logger.info(f"Retrieved diff from Redis with id{diff_id}")
+            diff_content=await redis_client.get_diff(diff_id)
+
+            if not diff_content:
+                logger.error(f"Diff {diff_id} not found in Redis")
+                return
+            
+            event_dict["pr_diff_content"] = diff_content
+            logger.info(f"Retrieved diff from Redis, size: {len(diff_content)} bytes")
+        else:
+            logger.error(f"Diff id not presented, failed")
+            return
+
 
         result = process_event(
             event_dict,
@@ -63,6 +56,11 @@ async def handle_message(message: AbstractIncomingMessage, channel):
             max_files=Config.MAX_FILES,
             max_lines=Config.MAX_LINES,
         )
+
+        # if diff_id:
+        #     await redis_client.delete_diff(diff_id)
+        #     logger.info(f"Deleted diff {diff_id} from Redis")
+
         out_exchange = await channel.get_exchange("out_exchange")
         msg=Message(
             body=orjson.dumps(result.model_dump()),
@@ -125,77 +123,137 @@ def process_event(
 
 # Helper:
 def parse_diff(diff_text: str, max_files: int, max_lines_per_file: int):
-    files, snippets = [], []
-    current_file, additions, deletions = None, 0, 0
-    added_lines: list[str] = []
-    removed_lines: list[str] = []
-
-    NOISY_ENDSWITH = ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".min.js")
-
-    def flush():
+    """
+    Parse unified diff into file metadata and code snippets.
+    
+    Args:
+        diff_text: Raw unified diff from GitHub
+        max_files: Maximum number of files to return
+        max_lines_per_file: Maximum lines per file snippet
+    
+    Returns:
+        (files, snippets): 
+            - files: List of {filename, additions, deletions}
+            - snippets: List of {filename, added_text, removed_text}
+    """
+    # Validation
+    if not diff_text or not diff_text.strip():
+        logger.warning("Empty diff provided")
+        return [], []
+    
+    files = []
+    snippets = []
+    
+    # Current file state
+    current_file = None
+    additions = 0
+    deletions = 0
+    added_lines = []
+    removed_lines = []
+    
+    # Files to ignore (generated, minified, lock files)
+    SKIP_PATTERNS = (
+        "package-lock.json",
+        "pnpm-lock.yaml", 
+        "yarn.lock",
+        "uv.lock",
+        ".min.js",
+        ".min.css",
+        "dist/",
+        "build/",
+    )
+    
+    def should_skip_file(filename: str) -> bool:
+        """Check if file should be excluded from review"""
+        return any(pattern in filename for pattern in SKIP_PATTERNS)
+    
+    def save_file_data():
+        """Save current file's data to results"""
         nonlocal current_file, additions, deletions, added_lines, removed_lines
-        if current_file is not None:
-            files.append(
-                {
-                    "filename": current_file,
-                    "additions": additions,
-                    "deletions": deletions,
-                }
-            )
-
-            if not current_file.endswith(NOISY_ENDSWITH):
-                snippet = {
-                    "filename": current_file,
-                    "added_text": (
-                        "\n".join(added_lines[:max_lines_per_file])
-                        if added_lines
-                        else ""
-                    ),
-                    "removed_text": (
-                        "\n".join(removed_lines[:max_lines_per_file])
-                        if removed_lines
-                        else ""
-                    ),
-                }
-                if snippet["added_text"] or snippet["removed_text"]:
-                    snippets.append(snippet)
-
-        current_file, additions, deletions = None, 0, 0
-        added_lines, removed_lines = [], []
-
+        
+        if current_file is None:
+            return
+        
+        # Always save file metadata
+        files.append({
+            "filename": current_file,
+            "additions": additions,
+            "deletions": deletions,
+        })
+        
+        # Only save snippets for non-noisy files with actual changes
+        if not should_skip_file(current_file) and (added_lines or removed_lines):
+            snippets.append({
+                "filename": current_file,
+                "added_text": "\n".join(added_lines[:max_lines_per_file]),
+                "removed_text": "\n".join(removed_lines[:max_lines_per_file]),
+            })
+        
+        # Reset state for next file
+        current_file = None
+        additions = 0
+        deletions = 0
+        added_lines = []
+        removed_lines = []
+    
+    # Parse diff line by line
     for line in diff_text.splitlines():
         if line.startswith("diff --git "):
-            if current_file is not None:
-                flush()
+            # New file header - save previous file and reset
+            save_file_data()
             current_file = None
-
+        
         elif line.startswith("+++ b/"):
-            current_file = line[len("+++ b/") :].strip()
-
+            # Extract filename (new version)
+            current_file = line[6:].strip()  # Skip "+++ b/"
+        
         elif line.startswith("--- a/"):
+            # Old version filename - ignore
             pass
-
+        
+        elif line.startswith("@@"):
+            # Hunk header - ignore
+            pass
+        
         else:
+            # Only process if we have a current file
             if current_file is None:
                 continue
-
+            
+            # Added line
             if line.startswith("+") and not line.startswith("+++"):
                 additions += 1
-                added_lines.append(line[1:])
-
+                added_lines.append(line[1:])  # Remove '+' prefix
+            
+            # Deleted line
             elif line.startswith("-") and not line.startswith("---"):
                 deletions += 1
-                removed_lines.append(line[1:])
-
-    if current_file is not None:
-        flush()
-
-    files.sort(key=lambda file_info: file_info["additions"], reverse=True)
+                removed_lines.append(line[1:])  # Remove '-' prefix
+            
+            # Context line (no prefix) - ignore for now
+    
+    # Don't forget the last file!
+    save_file_data()
+    
+    # Sort by total impact (additions + deletions)
+    files.sort(key=lambda f: f["additions"] + f["deletions"], reverse=True)
+    
+    # Select top N most-changed files
     top_files = files[:max_files]
-    top_paths = {file_info["filename"] for file_info in top_files}
+    selected_filenames = {f["filename"] for f in top_files}
+    
+    # Filter snippets to only include top files
     top_snippets = [
-        snippet for snippet in snippets if snippet["filename"] in top_paths
+        s for s in snippets 
+        if s["filename"] in selected_filenames
     ][:max_files]
+    
+    logger.info(
+        f"Parsed {len(files)} files, "
+        f"selected {len(top_files)} top files, "
+        f"{len(top_snippets)} snippets for review"
+    )
+    
     return top_files, top_snippets
 
 def load_prompt_template(path: Path) -> str:
@@ -232,7 +290,7 @@ def call_openrouter(
 
     body = {
         "model": model,
-        "temperature": 0.2,
+        "temperature": 0.5,
         "response_format": {"type": "json_object"},
         "messages": [
             {
@@ -306,6 +364,8 @@ async def main():
             pass
 
     await stop_event.wait()
+
+    await redis_client.close()
     await conn.close()
 
 

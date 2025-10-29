@@ -5,6 +5,10 @@ load_dotenv()
 
 class Config:
     RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost/")
+    
+    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+    DIFF_TTL = int(os.getenv("DIFF_TTL", "3600"))
+
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
     OPENROUTER_BASE = os.getenv("OPENROUTER_BASE", "https://openrouter.ai/api/v1")
     MODEL = os.getenv("MODEL", "deepseek/deepseek-chat-v3.1:free")
