@@ -1,6 +1,9 @@
 import redis.asyncio as redis
 import os
 import logging
+from typing import Dict
+import json
+
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +33,31 @@ class RedisClient:
         except Exception as e:
             log.error(f"Failed to store diff {diff_id}: {e}")
             return False
+    
+    async def store_rate(self, cache_key: str, scores: Dict[str, float], ttl: int = 6 * 60 * 60) -> bool:
+        """Store PR's language priorities scores"""
+        try:
+            client = await self.get_client()
+            await client.setex(cache_key, ttl, json.dumps(scores))
+            return True
+        except Exception as e:
+            log.error(f"Failed to store language scores for {cache_key}: {e}")
+            return False
+        
+    async def get_score(self, cache_key: str) -> Dict[str, float] | None:
+        """Retrieve PR's language scores"""
+        try:
+            client = await self.get_client()
+            scores_json = await client.get(cache_key)
+            scores: Dict[str, float] = json.loads(scores_json)
+            if scores_json:
+                log.info(f"Retrieved language scores for {cache_key}")
+            else:
+                log.warning(f"Language scores for {cache_key} not found or expired")
+            return scores
+        except Exception as e:
+            log.error(f"Failed to retrieve language scores for {cache_key}: {e}")
+            return None
         
     async def close(self):
         """Close Redis connection"""

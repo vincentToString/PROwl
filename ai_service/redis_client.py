@@ -1,6 +1,8 @@
 import redis.asyncio as redis
 import os
 import logging
+import json
+from typing import Optional, Dict
 
 log = logging.getLogger(__name__)
 
@@ -20,18 +22,18 @@ class RedisClient:
             log.info(f"Redis client connected to {self.url}")
         return self._client
     
-    async def store_diff(self, diff_id: str, diff_content: str, ttl: int = 3600) -> bool:
-        """Store diff content with TTL (default 1 hour)"""
-        try:
-            client = await self.get_client()
-            await client.setex(f"diff:{diff_id}", ttl, diff_content)
-            log.info(f"Stored diff {diff_id} with TTL {ttl}s")
-            return True
-        except Exception as e:
-            log.error(f"Failed to store diff {diff_id}: {e}")
-            return False
+    # async def store_diff(self, diff_id: str, diff_content: str, ttl: int = 3600) -> bool:
+    #     """Store diff content with TTL (default 1 hour)"""
+    #     try:
+    #         client = await self.get_client()
+    #         await client.setex(f"diff:{diff_id}", ttl, diff_content)
+    #         log.info(f"Stored diff {diff_id} with TTL {ttl}s")
+    #         return True
+    #     except Exception as e:
+    #         log.error(f"Failed to store diff {diff_id}: {e}")
+    #         return False
     
-    async def get_diff(self, diff_id: str) -> str | None:
+    async def get_diff(self, diff_id: str) -> Optional[Dict]:
         """Retrieve diff content"""
         try:
             client = await self.get_client()
@@ -40,7 +42,7 @@ class RedisClient:
                 log.info(f"Retrieved diff {diff_id}")
             else:
                 log.warning(f"Diff {diff_id} not found or expired")
-            return diff_content
+            return json.loads(diff_content)
         except Exception as e:
             log.error(f"Failed to retrieve diff {diff_id}: {e}")
             return None

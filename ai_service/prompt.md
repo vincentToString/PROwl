@@ -27,7 +27,7 @@ RUBRIC
   • warn = should fix (tests/robustness/API contract)
   • info = helpful context/risks/assumptions
   • nit = minor style/readability
-- Be concise and actionable. Maximum 6 findings.
+- Be concise and actionable. Maximum 10 findings.
 - Prefer high-impact issues over trivial style nits.
 
 ---

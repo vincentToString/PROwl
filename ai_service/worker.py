@@ -13,6 +13,7 @@ import signal
 from ai_service.models import PullRequestData, ReviewResult, Finding
 from ai_service.config import Config
 from ai_service.redis_client import RedisClient
+from typing import Tuple, List, Dict
 
 
 
@@ -34,13 +35,13 @@ async def handle_message(message: AbstractIncomingMessage, channel):
         if diff_id:
             logger.info(f"Retrieved diff from Redis with id{diff_id}")
             diff_content=await redis_client.get_diff(diff_id)
+            # pr_data is a Dict (RedisClient converts JSON string → dict)
 
             if not diff_content:
                 logger.error(f"Diff {diff_id} not found in Redis")
                 return
             
-            event_dict["pr_diff_content"] = diff_content
-            logger.info(f"Retrieved diff from Redis, size: {len(diff_content)} bytes")
+            event_dict["pr_data"] = diff_content
         else:
             logger.error(f"Diff id not presented, failed")
             return
@@ -86,11 +87,20 @@ def process_event(
     max_lines: int,
 ) -> ReviewResult:
     event = PullRequestData.model_validate(event_dict)
-    if not event.pr_diff_content:
+    if not event.pr_data:
         logger.error(f"Receiving PR #{event.pr_number}has no diff content available")
         raise Exception(f"Invalid PR to review: #{event.pr_number}")
-    files, snippets = parse_diff(
-        event.pr_diff_content, max_files=max_files, max_lines_per_file=max_lines
+    files, snippets = parse_compressed_diff(
+        event.pr_data, max_files=max_files, max_lines_per_file=max_lines
+    )
+
+    if not files or not snippets:
+        logger.error(f"No files or snippets parsed for PR #{event.pr_number}")
+        raise Exception(f"Failed to parse diff for PR #{event.pr_number}")
+    
+    logger.info(
+        f"Parsed {len(files)} files and {len(snippets)} snippets "
+        f"for {event.repo_name} PR#{event.pr_number}"
     )
 
     prompt_template = load_prompt_template(prompt_path)
@@ -256,6 +266,112 @@ def parse_diff(diff_text: str, max_files: int, max_lines_per_file: int):
     
     return top_files, top_snippets
 
+def parse_compressed_diff(diff_compressed: dict, max_files: int, max_lines_per_file: int) -> Tuple[List[Dict], List[Dict]]:
+    compression = diff_compressed.get("compression", {})
+
+    if not compression:
+        logger.error("No compressed diff file found")
+        return [], []
+    
+    files_data = compression.get("files", [])
+    if not files_data:
+        logger.error("No file data found")
+        return [], []
+    
+    files = []
+    snippets = []
+
+    full_tier = files_data.get("full", [])
+    logger.info(f"Processing {len(full_tier)} full-tier files")
+
+    for file_data in full_tier[:max_files]:
+        files.append({
+            "filename": file_data["path"], 
+            "additions": file_data["additions"], 
+            "deletions": file_data["deletions"],
+            "status": file_data["status"],  
+            "language": file_data["language"],  
+            "is_critical": file_data["is_critical"],  
+            "importance_score": file_data["importance_score"]  
+        })
+
+        patch = file_data.get("patch", "")
+
+        if not patch:
+            logger.warning(f"No patch found for {file_data['path']}")
+            continue
+
+        added_lines = []
+        removed_lines = []
+
+        for line in patch.splitlines():
+            if line.startswith("+") and not line.startswith("+++"):
+                added_lines.append(line[1:])  # Remove '+' prefix
+            # Removed line
+            elif line.startswith("-") and not line.startswith("---"):
+                removed_lines.append(line[1:])  # Remove '-' prefix
+
+        snippets.append({
+            "filename": file_data["path"],
+            "added_text": "\n".join(added_lines[:max_lines_per_file]),
+            "removed_text": "\n".join(removed_lines[:max_lines_per_file]),
+            "is_critical": file_data.get("is_critical", False),
+            "language": file_data.get("language", "unknown")
+        })
+
+    remaining_slots = max_files - len(files)
+
+    if remaining_slots > 0:
+        summary_tier = files_data.get("summary", [])
+        logger.info(f"Processing {len(summary_tier)} summary-tier files (limit: {remaining_slots})")
+
+        for file_data in summary_tier[:remaining_slots]:
+            files.append({
+                "filename": file_data["path"],
+                "additions": file_data["additions"],
+                "deletions": file_data["deletions"],
+                "status": file_data["status"],
+                "language": file_data["language"],
+                "is_critical": file_data["is_critical"],
+                "importance_score": file_data["importance_score"]
+            })
+        
+            # Summary tier doesn't have patch, provide metadata-only placeholder
+            snippets.append({
+                "filename": file_data["path"],  
+                "added_text": f"[Summary only: +{file_data['additions']} lines added]",
+                "removed_text": f"[Summary only: -{file_data['deletions']} lines removed]",
+                "is_critical": file_data["is_critical"],
+                "language": file_data["language"],
+                "note": "Full diff excluded due to token limits"
+            })
+        
+    # ==========================================
+    # Process LISTED-TIER files (just log them)
+    # ==========================================
+    listed_tier = files_data.get("listed", [])
+    
+    if listed_tier:
+        # ✅ FIXED: listed_tier is List[str], not List[Dict]
+        logger.info(
+            f"{len(listed_tier)} files listed but not included in review: "
+            f"{', '.join(listed_tier[:5])}"
+            f"{'...' if len(listed_tier) > 5 else ''}"
+        )
+        
+        # Note: We don't add these to files/snippets lists
+        # They're just for logging/stats purposes
+    
+    logger.info(
+        f"Parsed compressed diff: {len(files)} files, "
+        f"{len(snippets)} snippets for review "
+        f"(strategy: {compression.get('strategy', 'unknown')})"
+    )
+    
+    return files, snippets
+
+                
+
 def load_prompt_template(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
@@ -277,6 +393,64 @@ def render_prompt(
         .replace("{{files_table}}", build_files_table(files))
         .replace("{{snippets}}", build_snippets_block(snippets))
     )
+
+# def render_prompt(
+#     template: str,
+#     event: PullRequestData,
+#     files: List[Dict],
+#     snippets: List[Dict]
+# ) -> str:
+#     """
+#     Render prompt template with PR data
+    
+#     Enhanced to include compression metadata if available
+#     """
+    
+#     # Build file list
+#     file_list = []
+#     for f in files:
+#         critical_marker = "🔴 " if f.get("is_critical") else ""
+#         score = f.get("importance_score", 0)
+        
+#         file_list.append(
+#             f"{critical_marker}{f['filename']} "
+#             f"(+{f['additions']}/-{f['deletions']}) "
+#             f"[{f.get('language', 'unknown')}]"
+#             f"{f' [score: {score:.1f}]' if score > 0 else ''}"
+#         )
+    
+#     # Build code snippets
+#     code_changes = []
+#     for snippet in snippets:
+#         critical_marker = "🔴 CRITICAL: " if snippet.get("is_critical") else ""
+#         note = snippet.get("note", "")
+        
+#         section = f"### {critical_marker}{snippet['filename']}"
+#         if note:
+#             section += f"\n_{note}_"
+#         section += "\n\n"
+        
+#         if snippet.get("added_text"):
+#             section += f"**Added:**\n```{snippet.get('language', '')}\n{snippet['added_text']}\n```\n\n"
+        
+#         if snippet.get("removed_text"):
+#             section += f"**Removed:**\n```{snippet.get('language', '')}\n{snippet['removed_text']}\n```\n\n"
+        
+#         code_changes.append(section)
+    
+#     # Fill template
+#     rendered = template.format(
+#         repo_name=event.repo_name,
+#         pr_number=event.pr_number,
+#         pr_title=event.pr_title,
+#         pr_author=event.pr_author,
+#         pr_body=event.pr_body or "(No description)",
+#         file_count=len(files),
+#         file_list="\n".join(file_list),
+#         code_changes="\n".join(code_changes),
+#     )
+    
+#     return rendered
 
 def call_openrouter(
     prompt_text: str, model: str, base_url: str, api_key: str, timeout_s: int
