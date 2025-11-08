@@ -14,74 +14,87 @@ from ai_service.models import PullRequestData, ReviewResult, Finding
 from ai_service.config import Config
 from ai_service.redis_client import RedisClient
 from typing import Tuple, List, Dict
-
-
+import boto3
+from botocore.config import Config as BotoCoreConfig
+from botocore.exceptions import BotoCoreError, ClientError
 
 
 logging.basicConfig(
-      level=logging.INFO,
-      format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'     
-  )
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
+
+BEDROCK_SYSTEM_PROMPT = "You are a precise code review assistant. Return ONLY JSON."
 
 redis_client = RedisClient(Config.REDIS_URL)
 
+
 async def handle_message(message: AbstractIncomingMessage, channel):
-    async with message.process(requeue=False): # manual ack
+    async with message.process(requeue=False):  # manual ack
         event_dict = json.loads(message.body.decode("utf-8"))
 
         diff_id = event_dict.get("diff_id")
 
         if diff_id:
             logger.info(f"Retrieved diff from Redis with id{diff_id}")
-            diff_content=await redis_client.get_diff(diff_id)
+            diff_content = await redis_client.get_diff(diff_id)
             # pr_data is a Dict (RedisClient converts JSON string → dict)
 
             if not diff_content:
                 logger.error(f"Diff {diff_id} not found in Redis")
                 return
-            
+
             event_dict["pr_data"] = diff_content
         else:
             logger.error(f"Diff id not presented, failed")
             return
 
-
         result = process_event(
             event_dict,
             prompt_path=Path(__file__).parent / "prompt.md",
-            model=Config.MODEL,
-            base_url=Config.OPENROUTER_BASE,
-            api_key=Config.OPENROUTER_API_KEY,
+            bedrock_model_id=Config.BEDROCK_MODEL_ID,
+            aws_region=Config.AWS_REGION,
             llm_timeout=Config.LLM_TIMEOUT,
             max_files=Config.MAX_FILES,
             max_lines=Config.MAX_LINES,
         )
+
+        # Legacy OpenRouter version
+        #
+        # result = process_event(
+        #     event_dict,
+        #     prompt_path=Path(__file__).parent / "prompt.md",
+        #     model=Config.MODEL,
+        #     base_url=Config.OPENROUTER_BASE,
+        #     api_key=Config.OPENROUTER_API_KEY,
+        #     llm_timeout=Config.LLM_TIMEOUT,
+        #     max_files=Config.MAX_FILES,
+        #     max_lines=Config.MAX_LINES,
+        # )
 
         # if diff_id:
         #     await redis_client.delete_diff(diff_id)
         #     logger.info(f"Deleted diff {diff_id} from Redis")
 
         out_exchange = await channel.get_exchange("out_exchange")
-        msg=Message(
+        msg = Message(
             body=orjson.dumps(result.model_dump()),
             delivery_mode=DeliveryMode.PERSISTENT,
-            content_type="application/json", 
+            content_type="application/json",
             headers={"repo": result.repo_name, "pr_number": result.pr_number},
         )
         await out_exchange.publish(msg, routing_key="")
-        logger.info("Published review result for %s PR#%s", result.repo_name, result.pr_number)
+        logger.info(
+            "Published review result for %s PR#%s", result.repo_name, result.pr_number
+        )
 
 
-
-            
 def process_event(
     event_dict: dict,
     *,
     prompt_path: Path,
-    model: str,
-    base_url: str,
-    api_key: str,
+    bedrock_model_id: str,
+    aws_region: str,
     llm_timeout: int,
     max_files: int,
     max_lines: int,
@@ -97,7 +110,7 @@ def process_event(
     if not files or not snippets:
         logger.error(f"No files or snippets parsed for PR #{event.pr_number}")
         raise Exception(f"Failed to parse diff for PR #{event.pr_number}")
-    
+
     logger.info(
         f"Parsed {len(files)} files and {len(snippets)} snippets "
         f"for {event.repo_name} PR#{event.pr_number}"
@@ -105,13 +118,22 @@ def process_event(
 
     prompt_template = load_prompt_template(prompt_path)
     prompt = render_prompt(prompt_template, event, files, snippets)
-    llm_response = call_openrouter(
+    llm_response = call_bedrock(
         prompt,
-        model=model,
-        base_url=base_url,
-        api_key=api_key,
+        model_id=bedrock_model_id,
+        region=aws_region,
         timeout_s=llm_timeout,
     )
+
+    # Legacy OpenRouter version
+    #
+    # llm_response = call_openrouter(
+    #     prompt,
+    #     model=model,
+    #     base_url=base_url,
+    #     api_key=api_key,
+    #     timeout_s=llm_timeout,
+    # )
 
     findings = [
         Finding.model_validate(finding)
@@ -128,21 +150,26 @@ def process_event(
             "Avoid secrets in code",
             "Add/adjust tests when behavior changes",
         ],
-        llm_meta={"provider": "openrouter", "model": model},
+        llm_meta={
+            "provider": "bedrock",
+            "model": bedrock_model_id,
+            "region": aws_region,
+        },
     )
+
 
 # Helper:
 def parse_diff(diff_text: str, max_files: int, max_lines_per_file: int):
     """
     Parse unified diff into file metadata and code snippets.
-    
+
     Args:
         diff_text: Raw unified diff from GitHub
         max_files: Maximum number of files to return
         max_lines_per_file: Maximum lines per file snippet
-    
+
     Returns:
-        (files, snippets): 
+        (files, snippets):
             - files: List of {filename, additions, deletions}
             - snippets: List of {filename, added_text, removed_text}
     """
@@ -150,21 +177,21 @@ def parse_diff(diff_text: str, max_files: int, max_lines_per_file: int):
     if not diff_text or not diff_text.strip():
         logger.warning("Empty diff provided")
         return [], []
-    
+
     files = []
     snippets = []
-    
+
     # Current file state
     current_file = None
     additions = 0
     deletions = 0
     added_lines = []
     removed_lines = []
-    
+
     # Files to ignore (generated, minified, lock files)
     SKIP_PATTERNS = (
         "package-lock.json",
-        "pnpm-lock.yaml", 
+        "pnpm-lock.yaml",
         "yarn.lock",
         "uv.lock",
         ".min.js",
@@ -172,112 +199,118 @@ def parse_diff(diff_text: str, max_files: int, max_lines_per_file: int):
         "dist/",
         "build/",
     )
-    
+
     def should_skip_file(filename: str) -> bool:
         """Check if file should be excluded from review"""
         return any(pattern in filename for pattern in SKIP_PATTERNS)
-    
+
     def save_file_data():
         """Save current file's data to results"""
         nonlocal current_file, additions, deletions, added_lines, removed_lines
-        
+
         if current_file is None:
             return
-        
+
         # Always save file metadata
-        files.append({
-            "filename": current_file,
-            "additions": additions,
-            "deletions": deletions,
-        })
-        
+        files.append(
+            {
+                "filename": current_file,
+                "additions": additions,
+                "deletions": deletions,
+            }
+        )
+
         # Only save snippets for non-noisy files with actual changes
         if not should_skip_file(current_file) and (added_lines or removed_lines):
-            snippets.append({
-                "filename": current_file,
-                "added_text": "\n".join(added_lines[:max_lines_per_file]),
-                "removed_text": "\n".join(removed_lines[:max_lines_per_file]),
-            })
-        
+            snippets.append(
+                {
+                    "filename": current_file,
+                    "added_text": "\n".join(added_lines[:max_lines_per_file]),
+                    "removed_text": "\n".join(removed_lines[:max_lines_per_file]),
+                }
+            )
+
         # Reset state for next file
         current_file = None
         additions = 0
         deletions = 0
         added_lines = []
         removed_lines = []
-    
+
     # Parse diff line by line
     for line in diff_text.splitlines():
         if line.startswith("diff --git "):
             # New file header - save previous file and reset
             save_file_data()
             current_file = None
-        
+
         elif line.startswith("+++ b/"):
             # Extract filename (new version)
             current_file = line[6:].strip()  # Skip "+++ b/"
-        
+
         elif line.startswith("--- a/"):
             # Old version filename - ignore
             pass
-        
+
         elif line.startswith("@@"):
             # Hunk header - ignore
             pass
-        
+
         else:
             # Only process if we have a current file
             if current_file is None:
                 continue
-            
+
             # Added line
             if line.startswith("+") and not line.startswith("+++"):
                 additions += 1
                 added_lines.append(line[1:])  # Remove '+' prefix
-            
+
             # Deleted line
             elif line.startswith("-") and not line.startswith("---"):
                 deletions += 1
                 removed_lines.append(line[1:])  # Remove '-' prefix
-            
+
             # Context line (no prefix) - ignore for now
-    
+
     # Don't forget the last file!
     save_file_data()
-    
+
     # Sort by total impact (additions + deletions)
     files.sort(key=lambda f: f["additions"] + f["deletions"], reverse=True)
-    
+
     # Select top N most-changed files
     top_files = files[:max_files]
     selected_filenames = {f["filename"] for f in top_files}
-    
+
     # Filter snippets to only include top files
-    top_snippets = [
-        s for s in snippets 
-        if s["filename"] in selected_filenames
-    ][:max_files]
-    
+    top_snippets = [s for s in snippets if s["filename"] in selected_filenames][
+        :max_files
+    ]
+
     logger.info(
         f"Parsed {len(files)} files, "
         f"selected {len(top_files)} top files, "
         f"{len(top_snippets)} snippets for review"
     )
-    
+
     return top_files, top_snippets
 
-def parse_compressed_diff(diff_compressed: dict, max_files: int, max_lines_per_file: int) -> Tuple[List[Dict], List[Dict]]:
+
+def parse_compressed_diff(
+    diff_compressed: dict, max_files: int, max_lines_per_file: int
+) -> Tuple[List[Dict], List[Dict]]:
     compression = diff_compressed.get("compression", {})
 
     if not compression:
         logger.error("No compressed diff file found")
         return [], []
-    
+
     files_data = compression.get("files", [])
     if not files_data:
         logger.error("No file data found")
         return [], []
-    
+
     files = []
     snippets = []
 
@@ -285,15 +318,17 @@ def parse_compressed_diff(diff_compressed: dict, max_files: int, max_lines_per_f
     logger.info(f"Processing {len(full_tier)} full-tier files")
 
     for file_data in full_tier[:max_files]:
-        files.append({
-            "filename": file_data["path"], 
-            "additions": file_data["additions"], 
-            "deletions": file_data["deletions"],
-            "status": file_data["status"],  
-            "language": file_data["language"],  
-            "is_critical": file_data["is_critical"],  
-            "importance_score": file_data["importance_score"]  
-        })
+        files.append(
+            {
+                "filename": file_data["path"],
+                "additions": file_data["additions"],
+                "deletions": file_data["deletions"],
+                "status": file_data["status"],
+                "language": file_data["language"],
+                "is_critical": file_data["is_critical"],
+                "importance_score": file_data["importance_score"],
+            }
+        )
 
         patch = file_data.get("patch", "")
 
@@ -311,46 +346,54 @@ def parse_compressed_diff(diff_compressed: dict, max_files: int, max_lines_per_f
             elif line.startswith("-") and not line.startswith("---"):
                 removed_lines.append(line[1:])  # Remove '-' prefix
 
-        snippets.append({
-            "filename": file_data["path"],
-            "added_text": "\n".join(added_lines[:max_lines_per_file]),
-            "removed_text": "\n".join(removed_lines[:max_lines_per_file]),
-            "is_critical": file_data.get("is_critical", False),
-            "language": file_data.get("language", "unknown")
-        })
+        snippets.append(
+            {
+                "filename": file_data["path"],
+                "added_text": "\n".join(added_lines[:max_lines_per_file]),
+                "removed_text": "\n".join(removed_lines[:max_lines_per_file]),
+                "is_critical": file_data.get("is_critical", False),
+                "language": file_data.get("language", "unknown"),
+            }
+        )
 
     remaining_slots = max_files - len(files)
 
     if remaining_slots > 0:
         summary_tier = files_data.get("summary", [])
-        logger.info(f"Processing {len(summary_tier)} summary-tier files (limit: {remaining_slots})")
+        logger.info(
+            f"Processing {len(summary_tier)} summary-tier files (limit: {remaining_slots})"
+        )
 
         for file_data in summary_tier[:remaining_slots]:
-            files.append({
-                "filename": file_data["path"],
-                "additions": file_data["additions"],
-                "deletions": file_data["deletions"],
-                "status": file_data["status"],
-                "language": file_data["language"],
-                "is_critical": file_data["is_critical"],
-                "importance_score": file_data["importance_score"]
-            })
-        
+            files.append(
+                {
+                    "filename": file_data["path"],
+                    "additions": file_data["additions"],
+                    "deletions": file_data["deletions"],
+                    "status": file_data["status"],
+                    "language": file_data["language"],
+                    "is_critical": file_data["is_critical"],
+                    "importance_score": file_data["importance_score"],
+                }
+            )
+
             # Summary tier doesn't have patch, provide metadata-only placeholder
-            snippets.append({
-                "filename": file_data["path"],  
-                "added_text": f"[Summary only: +{file_data['additions']} lines added]",
-                "removed_text": f"[Summary only: -{file_data['deletions']} lines removed]",
-                "is_critical": file_data["is_critical"],
-                "language": file_data["language"],
-                "note": "Full diff excluded due to token limits"
-            })
-        
+            snippets.append(
+                {
+                    "filename": file_data["path"],
+                    "added_text": f"[Summary only: +{file_data['additions']} lines added]",
+                    "removed_text": f"[Summary only: -{file_data['deletions']} lines removed]",
+                    "is_critical": file_data["is_critical"],
+                    "language": file_data["language"],
+                    "note": "Full diff excluded due to token limits",
+                }
+            )
+
     # ==========================================
     # Process LISTED-TIER files (just log them)
     # ==========================================
     listed_tier = files_data.get("listed", [])
-    
+
     if listed_tier:
         # ✅ FIXED: listed_tier is List[str], not List[Dict]
         logger.info(
@@ -358,25 +401,25 @@ def parse_compressed_diff(diff_compressed: dict, max_files: int, max_lines_per_f
             f"{', '.join(listed_tier[:5])}"
             f"{'...' if len(listed_tier) > 5 else ''}"
         )
-        
+
         # Note: We don't add these to files/snippets lists
         # They're just for logging/stats purposes
-    
+
     logger.info(
         f"Parsed compressed diff: {len(files)} files, "
         f"{len(snippets)} snippets for review "
         f"(strategy: {compression.get('strategy', 'unknown')})"
     )
-    
+
     return files, snippets
 
-                
 
 def load_prompt_template(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise SystemExit(f"Prompt file not found: {path.resolve()}")
+
 
 def render_prompt(
     prompt_template: str,
@@ -394,6 +437,7 @@ def render_prompt(
         .replace("{{snippets}}", build_snippets_block(snippets))
     )
 
+
 # def render_prompt(
 #     template: str,
 #     event: PullRequestData,
@@ -402,42 +446,42 @@ def render_prompt(
 # ) -> str:
 #     """
 #     Render prompt template with PR data
-    
+
 #     Enhanced to include compression metadata if available
 #     """
-    
+
 #     # Build file list
 #     file_list = []
 #     for f in files:
 #         critical_marker = "🔴 " if f.get("is_critical") else ""
 #         score = f.get("importance_score", 0)
-        
+
 #         file_list.append(
 #             f"{critical_marker}{f['filename']} "
 #             f"(+{f['additions']}/-{f['deletions']}) "
 #             f"[{f.get('language', 'unknown')}]"
 #             f"{f' [score: {score:.1f}]' if score > 0 else ''}"
 #         )
-    
+
 #     # Build code snippets
 #     code_changes = []
 #     for snippet in snippets:
 #         critical_marker = "🔴 CRITICAL: " if snippet.get("is_critical") else ""
 #         note = snippet.get("note", "")
-        
+
 #         section = f"### {critical_marker}{snippet['filename']}"
 #         if note:
 #             section += f"\n_{note}_"
 #         section += "\n\n"
-        
+
 #         if snippet.get("added_text"):
 #             section += f"**Added:**\n```{snippet.get('language', '')}\n{snippet['added_text']}\n```\n\n"
-        
+
 #         if snippet.get("removed_text"):
 #             section += f"**Removed:**\n```{snippet.get('language', '')}\n{snippet['removed_text']}\n```\n\n"
-        
+
 #         code_changes.append(section)
-    
+
 #     # Fill template
 #     rendered = template.format(
 #         repo_name=event.repo_name,
@@ -449,9 +493,77 @@ def render_prompt(
 #         file_list="\n".join(file_list),
 #         code_changes="\n".join(code_changes),
 #     )
-    
+
 #     return rendered
 
+
+def call_bedrock(
+    prompt_text: str,
+    *,
+    model_id: str,
+    region: str,
+    timeout_s: int,
+    temperature: float = 0.5,
+    max_tokens: int = 1024,
+) -> dict:
+    if not model_id:
+        raise RuntimeError("BEDROCK_MODEL_ID is not configured")
+
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=region,
+        config=BotoCoreConfig(
+            read_timeout=timeout_s,
+            connect_timeout=timeout_s,
+            retries={"max_attempts": 3, "mode": "standard"},
+        ),
+    )
+
+    body = {
+        "prompt": build_meta_prompt(prompt_text),
+        "max_gen_len": max_tokens,
+        "temperature": temperature,
+        "top_p": 0.9,
+    }
+
+    try:
+        response = client.invoke_model(
+            modelId=model_id,
+            body=json.dumps(body),
+            contentType="application/json",
+            accept="application/json",
+        )
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("Bedrock invocation failed")
+        raise RuntimeError("Bedrock invocation failed") from exc
+
+    payload_bytes = response["body"].read()
+    payload = json.loads(payload_bytes)
+
+    completion_text = (
+        payload.get("generation")
+        or payload.get("output_text")
+        or payload.get("completion")
+    )
+    if not completion_text:
+        outputs = payload.get("outputs") or []
+        if outputs:
+            completion_text = outputs[0].get("text") or (
+                outputs[0].get("content") or [{}]
+            )[0].get("text")
+
+    if not completion_text:
+        logger.error("Bedrock response missing completion text: %s", payload)
+        raise RuntimeError("Bedrock response missing completion text")
+
+    try:
+        return json.loads(completion_text)
+    except json.JSONDecodeError as exc:
+        logger.error("Bedrock completion was not valid JSON: %s", completion_text)
+        raise RuntimeError("Bedrock completion was not valid JSON") from exc
+
+
+# Legacy OpenRouter helper
 def call_openrouter(
     prompt_text: str, model: str, base_url: str, api_key: str, timeout_s: int
 ) -> dict:
@@ -482,6 +594,21 @@ def call_openrouter(
     content = data["choices"][0]["message"]["content"]
     return json.loads(content)
 
+
+def build_meta_prompt(user_prompt: str) -> str:
+    """Format prompt for Meta Llama instruction models on Bedrock."""
+    return (
+        "<|begin_of_text|>"
+        "<|start_header_id|>system<|end_header_id|>\n"
+        f"{BEDROCK_SYSTEM_PROMPT}\n"
+        "<|eot_id|>"
+        "<|start_header_id|>user<|end_header_id|>\n"
+        f"{user_prompt}\n"
+        "<|eot_id|>"
+        "<|start_header_id|>assistant<|end_header_id|>\n"
+    )
+
+
 def build_files_table(files: list[dict]) -> str:
     return (
         "\n".join(
@@ -490,6 +617,7 @@ def build_files_table(files: list[dict]) -> str:
         )
         or "(no files parsed)"
     )
+
 
 def build_snippets_block(snippets: list[dict]) -> str:
     if not snippets:
@@ -510,6 +638,7 @@ def build_snippets_block(snippets: list[dict]) -> str:
         blocks.append("\n".join(parts))
 
     return "\n".join(blocks)
+
 
 async def main():
     conn = await aio_pika.connect_robust(Config.RABBITMQ_URL)
