@@ -17,6 +17,7 @@ from typing import Tuple, List, Dict
 import boto3
 from botocore.config import Config as BotoCoreConfig
 from botocore.exceptions import BotoCoreError, ClientError
+import re
 
 
 logging.basicConfig(
@@ -118,6 +119,7 @@ def process_event(
 
     prompt_template = load_prompt_template(prompt_path)
     prompt = render_prompt(prompt_template, event, files, snippets)
+    logger.info(prompt)
     llm_response = call_bedrock(
         prompt,
         model_id=bedrock_model_id,
@@ -557,6 +559,10 @@ def call_bedrock(
         raise RuntimeError("Bedrock response missing completion text")
 
     try:
+        completion_text = completion_text.strip()
+        completion_text = re.sub(r'^```(?:json)?\s*\n?', '', completion_text)
+        completion_text = re.sub(r'\n?```\s*$', '', completion_text)
+        
         return json.loads(completion_text)
     except json.JSONDecodeError as exc:
         logger.error("Bedrock completion was not valid JSON: %s", completion_text)

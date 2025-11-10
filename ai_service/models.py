@@ -75,44 +75,7 @@ class ReviewResult(BaseModel):
         lines.append(self.summary)
         lines.append("")
 
-        # # Findings section
-        # if self.findings:
-        #     # Group findings by severity
-        #     severity_order = ["critical", "high", "medium", "low", "info"]
-        #     findings_by_severity = {}
-        #     for finding in self.findings:
-        #         sev = finding.severity.lower()
-        #         if sev not in findings_by_severity:
-        #             findings_by_severity[sev] = []
-        #         findings_by_severity[sev].append(finding)
 
-        #     lines.append("## 🔍 Findings")
-        #     lines.append("")
-
-        #     total = len(self.findings)
-        #     severity_counts = {sev: len(findings_by_severity.get(sev, [])) for sev in severity_order}
-        #     lines.append(f"**Total Issues Found:** {total}")
-
-        #     # Show severity breakdown
-        #     breakdown = " | ".join([f"{sev.capitalize()}: {count}" for sev, count in severity_counts.items() if count > 0])
-        #     lines.append(f"**Breakdown:** {breakdown}")
-        #     lines.append("")
-        #     lines.append("---")
-        #     lines.append("")
-
-        #     # Output findings grouped by severity
-        #     for severity in severity_order:
-        #         if severity in findings_by_severity:
-        #             for finding in findings_by_severity[severity]:
-        #                 lines.append(finding.to_markdown())
-        #                 lines.append("---")
-        #                 lines.append("")
-        # else:
-        #     lines.append("## ✅ No Issues Found")
-        #     lines.append("Great job! No significant issues were detected in this PR.")
-        #     lines.append("")
-        
-        # Findings section
         if self.findings:
             lines.append("## 🔍 Findings")
             lines.append("")
