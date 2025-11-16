@@ -14,128 +14,130 @@ import boto3
 import base64
 from ai_service.models import PullRequestData, ReviewResult, Finding
 from ai_service.config import Config
-
+from ai_service.redis_client import RedisClient
+from typing import Tuple, List, Dict
+import boto3
+from botocore.config import Config as BotoCoreConfig
+from botocore.exceptions import BotoCoreError, ClientError
+import re
 
 
 logging.basicConfig(
-      level=logging.INFO,
-      format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'     
-  )
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-async def handle_message(message: AbstractIncomingMessage, channel):
-    # async with message.process(requeue=False): # manual ack
-    #     try:
-    #         event_dict = json.loads(message.body.decode("utf-8"))
+BEDROCK_SYSTEM_PROMPT = "You are a precise code review assistant. Return ONLY JSON."
 
-    #         result = process_event(
-    #             event_dict,
-    #             prompt_path=Path(__file__).parent / "prompt.md",
-    #             model_id=Config.MODEL_ID,
-    #             aws_access_key=Config.AWS_ACCESS_KEY,
-    #             aws_secret_key=Config.AWS_SECRET_KEY,
-    #             aws_region=Config.AWS_DEFAULT_REGION,
-    #             llm_timeout=Config.LLM_TIMEOUT,
-    #             max_files=Config.MAX_FILES,
-    #             max_lines=Config.MAX_LINES,
-    #         )
-    #         out_exchange = await channel.get_exchange("out_exchange")
-    #         msg=Message(
-    #             body=orjson.dumps(result.model_dump()),
-    #             delivery_mode=DeliveryMode.PERSISTENT,
-    #             content_type="application/json", 
-    #             headers={"repo": result.repo_name, "pr_number": result.pr_number},
-    #         )
-    #         await out_exchange.publish(msg, routing_key="")
-    #         logger.info("Published review result for %s PR#%s", result.repo_name, result.pr_number)
-    #     except Exception as e:
-    #         logger.error("Error processing message: %s", e, exc_info=True)
-    #         # MVP: nack it (later customizable)
-    #         await message.nack(requeue=False)
-    
-    async with message.process(requeue=False): # manual ack
+redis_client = RedisClient(Config.REDIS_URL)
+
+
+async def handle_message(message: AbstractIncomingMessage, channel):
+    async with message.process(requeue=False):  # manual ack
         event_dict = json.loads(message.body.decode("utf-8"))
+
+        diff_id = event_dict.get("diff_id")
+
+        if diff_id:
+            logger.info(f"Retrieved diff from Redis with id{diff_id}")
+            diff_content = await redis_client.get_diff(diff_id)
+            # pr_data is a Dict (RedisClient converts JSON string → dict)
+
+            if not diff_content:
+                logger.error(f"Diff {diff_id} not found in Redis")
+                return
+
+            event_dict["pr_data"] = diff_content
+        else:
+            logger.error(f"Diff id not presented, failed")
+            return
 
         result = process_event(
             event_dict,
             prompt_path=Path(__file__).parent / "prompt.md",
+            bedrock_model_id=Config.BEDROCK_MODEL_ID,
+            aws_region=Config.AWS_REGION,
             llm_timeout=Config.LLM_TIMEOUT,
             max_files=Config.MAX_FILES,
             max_lines=Config.MAX_LINES,
         )
+
+        # Legacy OpenRouter version
+        #
+        # result = process_event(
+        #     event_dict,
+        #     prompt_path=Path(__file__).parent / "prompt.md",
+        #     model=Config.MODEL,
+        #     base_url=Config.OPENROUTER_BASE,
+        #     api_key=Config.OPENROUTER_API_KEY,
+        #     llm_timeout=Config.LLM_TIMEOUT,
+        #     max_files=Config.MAX_FILES,
+        #     max_lines=Config.MAX_LINES,
+        # )
+
+        # if diff_id:
+        #     await redis_client.delete_diff(diff_id)
+        #     logger.info(f"Deleted diff {diff_id} from Redis")
+
         out_exchange = await channel.get_exchange("out_exchange")
-        msg=Message(
+        msg = Message(
             body=orjson.dumps(result.model_dump()),
             delivery_mode=DeliveryMode.PERSISTENT,
-            content_type="application/json", 
+            content_type="application/json",
             headers={"repo": result.repo_name, "pr_number": result.pr_number},
         )
         await out_exchange.publish(msg, routing_key="")
-        logger.info("Published review result for %s PR#%s", result.repo_name, result.pr_number)
+        logger.info(
+            "Published review result for %s PR#%s", result.repo_name, result.pr_number
+        )
 
 
-
-            
 def process_event(
     event_dict: dict,
     *,
     prompt_path: Path,
+    bedrock_model_id: str,
+    aws_region: str,
     llm_timeout: int,
     max_files: int,
     max_lines: int,
 ) -> ReviewResult:
     event = PullRequestData.model_validate(event_dict)
-    if not event.pr_diff_content:
+    if not event.pr_data:
         logger.error(f"Receiving PR #{event.pr_number}has no diff content available")
         raise Exception(f"Invalid PR to review: #{event.pr_number}")
-    files, snippets = parse_diff(
-        event.pr_diff_content, max_files=max_files, max_lines_per_file=max_lines
+    files, snippets = parse_compressed_diff(
+        event.pr_data, max_files=max_files, max_lines_per_file=max_lines
+    )
+
+    if not files or not snippets:
+        logger.error(f"No files or snippets parsed for PR #{event.pr_number}")
+        raise Exception(f"Failed to parse diff for PR #{event.pr_number}")
+
+    logger.info(
+        f"Parsed {len(files)} files and {len(snippets)} snippets "
+        f"for {event.repo_name} PR#{event.pr_number}"
     )
 
     prompt_template = load_prompt_template(prompt_path)
     prompt = render_prompt(prompt_template, event, files, snippets)
-    
-    # Try AWS Bedrock first, fallback to OpenRouter if it fails
-    llm_response = None
-    provider_used = "unknown"
-    model_used = "unknown"
-    
-    # Attempt AWS Bedrock first if credentials are available
-    if Config.AWS_ACCESS_KEY and Config.AWS_SECRET_KEY:
-        try:
-            llm_response = call_bedrock(
-                prompt,
-                model_id=Config.MODEL_ID,
-                aws_access_key=Config.AWS_ACCESS_KEY,
-                aws_secret_key=Config.AWS_SECRET_KEY,
-                aws_region=Config.AWS_DEFAULT_REGION,
-                timeout_s=llm_timeout,
-            )
-            provider_used = "aws_bedrock"
-            model_used = Config.MODEL_ID
-            logger.info("Successfully used AWS Bedrock for LLM call")
-        except Exception as e:
-            logger.warning(f"AWS Bedrock failed: {e}, falling back to OpenRouter")
-    
-    # Fallback to OpenRouter if Bedrock failed or no AWS credentials
-    if llm_response is None:
-        if Config.OPENROUTER_API_KEY:
-            try:
-                llm_response = call_openrouter(
-                    prompt,
-                    model=Config.MODEL,
-                    base_url=Config.OPENROUTER_BASE,
-                    api_key=Config.OPENROUTER_API_KEY,
-                    timeout_s=llm_timeout,
-                )
-                provider_used = "openrouter"
-                model_used = Config.MODEL
-                logger.info("Successfully used OpenRouter for LLM call")
-            except Exception as e:
-                logger.error(f"OpenRouter also failed: {e}")
-                raise Exception("Both AWS Bedrock and OpenRouter failed")
-        else:
-            raise Exception("No LLM provider available: missing both AWS and OpenRouter credentials")
+    logger.info(prompt)
+    llm_response = call_bedrock(
+        prompt,
+        model_id=bedrock_model_id,
+        region=aws_region,
+        timeout_s=llm_timeout,
+    )
+
+    # Legacy OpenRouter version
+    #
+    # llm_response = call_openrouter(
+    #     prompt,
+    #     model=model,
+    #     base_url=base_url,
+    #     api_key=api_key,
+    #     timeout_s=llm_timeout,
+    # )
 
     findings = [
         Finding.model_validate(finding)
@@ -152,89 +154,277 @@ def process_event(
             "Avoid secrets in code",
             "Add/adjust tests when behavior changes",
         ],
-        llm_meta={"provider": provider_used, "model": model_used},
+        llm_meta={
+            "provider": "bedrock",
+            "model": bedrock_model_id,
+            "region": aws_region,
+        },
     )
+
+
 
 # Helper:
 def parse_diff(diff_text: str, max_files: int, max_lines_per_file: int):
-    files, snippets = [], []
-    current_file, additions, deletions = None, 0, 0
-    added_lines: list[str] = []
-    removed_lines: list[str] = []
+    """
+    Parse unified diff into file metadata and code snippets.
 
-    NOISY_ENDSWITH = ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".min.js")
+    Args:
+        diff_text: Raw unified diff from GitHub
+        max_files: Maximum number of files to return
+        max_lines_per_file: Maximum lines per file snippet
 
-    def flush():
+    Returns:
+        (files, snippets):
+            - files: List of {filename, additions, deletions}
+            - snippets: List of {filename, added_text, removed_text}
+    """
+    # Validation
+    if not diff_text or not diff_text.strip():
+        logger.warning("Empty diff provided")
+        return [], []
+
+    files = []
+    snippets = []
+
+    # Current file state
+    current_file = None
+    additions = 0
+    deletions = 0
+    added_lines = []
+    removed_lines = []
+
+    # Files to ignore (generated, minified, lock files)
+    SKIP_PATTERNS = (
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "uv.lock",
+        ".min.js",
+        ".min.css",
+        "dist/",
+        "build/",
+    )
+
+    def should_skip_file(filename: str) -> bool:
+        """Check if file should be excluded from review"""
+        return any(pattern in filename for pattern in SKIP_PATTERNS)
+
+    def save_file_data():
+        """Save current file's data to results"""
         nonlocal current_file, additions, deletions, added_lines, removed_lines
-        if current_file is not None:
-            files.append(
+
+        if current_file is None:
+            return
+
+        # Always save file metadata
+        files.append(
+            {
+                "filename": current_file,
+                "additions": additions,
+                "deletions": deletions,
+            }
+        )
+
+        # Only save snippets for non-noisy files with actual changes
+        if not should_skip_file(current_file) and (added_lines or removed_lines):
+            snippets.append(
                 {
                     "filename": current_file,
-                    "additions": additions,
-                    "deletions": deletions,
+                    "added_text": "\n".join(added_lines[:max_lines_per_file]),
+                    "removed_text": "\n".join(removed_lines[:max_lines_per_file]),
                 }
             )
 
-            if not current_file.endswith(NOISY_ENDSWITH):
-                snippet = {
-                    "filename": current_file,
-                    "added_text": (
-                        "\n".join(added_lines[:max_lines_per_file])
-                        if added_lines
-                        else ""
-                    ),
-                    "removed_text": (
-                        "\n".join(removed_lines[:max_lines_per_file])
-                        if removed_lines
-                        else ""
-                    ),
-                }
-                if snippet["added_text"] or snippet["removed_text"]:
-                    snippets.append(snippet)
+        # Reset state for next file
+        current_file = None
+        additions = 0
+        deletions = 0
+        added_lines = []
+        removed_lines = []
 
-        current_file, additions, deletions = None, 0, 0
-        added_lines, removed_lines = [], []
-
+    # Parse diff line by line
     for line in diff_text.splitlines():
         if line.startswith("diff --git "):
-            if current_file is not None:
-                flush()
+            # New file header - save previous file and reset
+            save_file_data()
             current_file = None
 
         elif line.startswith("+++ b/"):
-            current_file = line[len("+++ b/") :].strip()
+            # Extract filename (new version)
+            current_file = line[6:].strip()  # Skip "+++ b/"
 
         elif line.startswith("--- a/"):
+            # Old version filename - ignore
+            pass
+
+        elif line.startswith("@@"):
+            # Hunk header - ignore
             pass
 
         else:
+            # Only process if we have a current file
             if current_file is None:
                 continue
 
+            # Added line
             if line.startswith("+") and not line.startswith("+++"):
                 additions += 1
-                added_lines.append(line[1:])
+                added_lines.append(line[1:])  # Remove '+' prefix
 
+            # Deleted line
             elif line.startswith("-") and not line.startswith("---"):
                 deletions += 1
-                removed_lines.append(line[1:])
+                removed_lines.append(line[1:])  # Remove '-' prefix
 
-    if current_file is not None:
-        flush()
+            # Context line (no prefix) - ignore for now
 
-    files.sort(key=lambda file_info: file_info["additions"], reverse=True)
+    # Don't forget the last file!
+    save_file_data()
+
+    # Sort by total impact (additions + deletions)
+    files.sort(key=lambda f: f["additions"] + f["deletions"], reverse=True)
+
+    # Select top N most-changed files
     top_files = files[:max_files]
-    top_paths = {file_info["filename"] for file_info in top_files}
-    top_snippets = [
-        snippet for snippet in snippets if snippet["filename"] in top_paths
-    ][:max_files]
+    selected_filenames = {f["filename"] for f in top_files}
+
+    # Filter snippets to only include top files
+    top_snippets = [s for s in snippets if s["filename"] in selected_filenames][
+        :max_files
+    ]
+
+    logger.info(
+        f"Parsed {len(files)} files, "
+        f"selected {len(top_files)} top files, "
+        f"{len(top_snippets)} snippets for review"
+    )
+
     return top_files, top_snippets
+
+
+def parse_compressed_diff(
+    diff_compressed: dict, max_files: int, max_lines_per_file: int
+) -> Tuple[List[Dict], List[Dict]]:
+    compression = diff_compressed.get("compression", {})
+
+    if not compression:
+        logger.error("No compressed diff file found")
+        return [], []
+
+    files_data = compression.get("files", [])
+    if not files_data:
+        logger.error("No file data found")
+        return [], []
+
+    files = []
+    snippets = []
+
+    full_tier = files_data.get("full", [])
+    logger.info(f"Processing {len(full_tier)} full-tier files")
+
+    for file_data in full_tier[:max_files]:
+        files.append(
+            {
+                "filename": file_data["path"],
+                "additions": file_data["additions"],
+                "deletions": file_data["deletions"],
+                "status": file_data["status"],
+                "language": file_data["language"],
+                "is_critical": file_data["is_critical"],
+                "importance_score": file_data["importance_score"],
+            }
+        )
+
+        patch = file_data.get("patch", "")
+
+        if not patch:
+            logger.warning(f"No patch found for {file_data['path']}")
+            continue
+
+        added_lines = []
+        removed_lines = []
+
+        for line in patch.splitlines():
+            if line.startswith("+") and not line.startswith("+++"):
+                added_lines.append(line[1:])  # Remove '+' prefix
+            # Removed line
+            elif line.startswith("-") and not line.startswith("---"):
+                removed_lines.append(line[1:])  # Remove '-' prefix
+
+        snippets.append(
+            {
+                "filename": file_data["path"],
+                "added_text": "\n".join(added_lines[:max_lines_per_file]),
+                "removed_text": "\n".join(removed_lines[:max_lines_per_file]),
+                "is_critical": file_data.get("is_critical", False),
+                "language": file_data.get("language", "unknown"),
+            }
+        )
+
+    remaining_slots = max_files - len(files)
+
+    if remaining_slots > 0:
+        summary_tier = files_data.get("summary", [])
+        logger.info(
+            f"Processing {len(summary_tier)} summary-tier files (limit: {remaining_slots})"
+        )
+
+        for file_data in summary_tier[:remaining_slots]:
+            files.append(
+                {
+                    "filename": file_data["path"],
+                    "additions": file_data["additions"],
+                    "deletions": file_data["deletions"],
+                    "status": file_data["status"],
+                    "language": file_data["language"],
+                    "is_critical": file_data["is_critical"],
+                    "importance_score": file_data["importance_score"],
+                }
+            )
+
+            # Summary tier doesn't have patch, provide metadata-only placeholder
+            snippets.append(
+                {
+                    "filename": file_data["path"],
+                    "added_text": f"[Summary only: +{file_data['additions']} lines added]",
+                    "removed_text": f"[Summary only: -{file_data['deletions']} lines removed]",
+                    "is_critical": file_data["is_critical"],
+                    "language": file_data["language"],
+                    "note": "Full diff excluded due to token limits",
+                }
+            )
+
+    # ==========================================
+    # Process LISTED-TIER files (just log them)
+    # ==========================================
+    listed_tier = files_data.get("listed", [])
+
+    if listed_tier:
+        # ✅ FIXED: listed_tier is List[str], not List[Dict]
+        logger.info(
+            f"{len(listed_tier)} files listed but not included in review: "
+            f"{', '.join(listed_tier[:5])}"
+            f"{'...' if len(listed_tier) > 5 else ''}"
+        )
+
+        # Note: We don't add these to files/snippets lists
+        # They're just for logging/stats purposes
+
+    logger.info(
+        f"Parsed compressed diff: {len(files)} files, "
+        f"{len(snippets)} snippets for review "
+        f"(strategy: {compression.get('strategy', 'unknown')})"
+    )
+
+    return files, snippets
+
 
 def load_prompt_template(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise SystemExit(f"Prompt file not found: {path.resolve()}")
+
 
 def render_prompt(
     prompt_template: str,
@@ -252,6 +442,137 @@ def render_prompt(
         .replace("{{snippets}}", build_snippets_block(snippets))
     )
 
+
+# def render_prompt(
+#     template: str,
+#     event: PullRequestData,
+#     files: List[Dict],
+#     snippets: List[Dict]
+# ) -> str:
+#     """
+#     Render prompt template with PR data
+
+#     Enhanced to include compression metadata if available
+#     """
+
+#     # Build file list
+#     file_list = []
+#     for f in files:
+#         critical_marker = "🔴 " if f.get("is_critical") else ""
+#         score = f.get("importance_score", 0)
+
+#         file_list.append(
+#             f"{critical_marker}{f['filename']} "
+#             f"(+{f['additions']}/-{f['deletions']}) "
+#             f"[{f.get('language', 'unknown')}]"
+#             f"{f' [score: {score:.1f}]' if score > 0 else ''}"
+#         )
+
+#     # Build code snippets
+#     code_changes = []
+#     for snippet in snippets:
+#         critical_marker = "🔴 CRITICAL: " if snippet.get("is_critical") else ""
+#         note = snippet.get("note", "")
+
+#         section = f"### {critical_marker}{snippet['filename']}"
+#         if note:
+#             section += f"\n_{note}_"
+#         section += "\n\n"
+
+#         if snippet.get("added_text"):
+#             section += f"**Added:**\n```{snippet.get('language', '')}\n{snippet['added_text']}\n```\n\n"
+
+#         if snippet.get("removed_text"):
+#             section += f"**Removed:**\n```{snippet.get('language', '')}\n{snippet['removed_text']}\n```\n\n"
+
+#         code_changes.append(section)
+
+#     # Fill template
+#     rendered = template.format(
+#         repo_name=event.repo_name,
+#         pr_number=event.pr_number,
+#         pr_title=event.pr_title,
+#         pr_author=event.pr_author,
+#         pr_body=event.pr_body or "(No description)",
+#         file_count=len(files),
+#         file_list="\n".join(file_list),
+#         code_changes="\n".join(code_changes),
+#     )
+
+#     return rendered
+
+
+def call_bedrock(
+    prompt_text: str,
+    *,
+    model_id: str,
+    region: str,
+    timeout_s: int,
+    temperature: float = 0.5,
+    max_tokens: int = 1024,
+) -> dict:
+    if not model_id:
+        raise RuntimeError("BEDROCK_MODEL_ID is not configured")
+
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=region,
+        config=BotoCoreConfig(
+            read_timeout=timeout_s,
+            connect_timeout=timeout_s,
+            retries={"max_attempts": 3, "mode": "standard"},
+        ),
+    )
+
+    body = {
+        "prompt": build_meta_prompt(prompt_text),
+        "max_gen_len": max_tokens,
+        "temperature": temperature,
+        "top_p": 0.9,
+    }
+
+    try:
+        response = client.invoke_model(
+            modelId=model_id,
+            body=json.dumps(body),
+            contentType="application/json",
+            accept="application/json",
+        )
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("Bedrock invocation failed")
+        raise RuntimeError("Bedrock invocation failed") from exc
+
+    payload_bytes = response["body"].read()
+    payload = json.loads(payload_bytes)
+
+    completion_text = (
+        payload.get("generation")
+        or payload.get("output_text")
+        or payload.get("completion")
+    )
+    if not completion_text:
+        outputs = payload.get("outputs") or []
+        if outputs:
+            completion_text = outputs[0].get("text") or (
+                outputs[0].get("content") or [{}]
+            )[0].get("text")
+
+    if not completion_text:
+        logger.error("Bedrock response missing completion text: %s", payload)
+        raise RuntimeError("Bedrock response missing completion text")
+
+    try:
+        completion_text = completion_text.strip()
+        completion_text = re.sub(r'^```(?:json)?\s*\n?', '', completion_text)
+        completion_text = re.sub(r'\n?```\s*$', '', completion_text)
+        
+        return json.loads(completion_text)
+    except json.JSONDecodeError as exc:
+        logger.error("Bedrock completion was not valid JSON: %s", completion_text)
+        raise RuntimeError("Bedrock completion was not valid JSON") from exc
+
+
+# Legacy OpenRouter helper
 def call_openrouter(
     prompt_text: str, model: str, base_url: str, api_key: str, timeout_s: int
 ) -> dict:
@@ -264,7 +585,7 @@ def call_openrouter(
 
     body = {
         "model": model,
-        "temperature": 0.2,
+        "temperature": 0.5,
         "response_format": {"type": "json_object"},
         "messages": [
             {
@@ -282,50 +603,20 @@ def call_openrouter(
     content = data["choices"][0]["message"]["content"]
     return json.loads(content)
 
-def call_bedrock(
-    prompt_text: str, model_id: str, aws_access_key: str, aws_secret_key: str, aws_region: str, timeout_s: int
-) -> dict:
-    # Create Bedrock client with explicit credentials
-    bedrock_client = boto3.client(
-        'bedrock-runtime',
-        region_name=aws_region,
-        aws_access_key_id=aws_access_key,
-        aws_secret_access_key=aws_secret_key
+
+def build_meta_prompt(user_prompt: str) -> str:
+    """Format prompt for Meta Llama instruction models on Bedrock."""
+    return (
+        "<|begin_of_text|>"
+        "<|start_header_id|>system<|end_header_id|>\n"
+        f"{BEDROCK_SYSTEM_PROMPT}\n"
+        "<|eot_id|>"
+        "<|start_header_id|>user<|end_header_id|>\n"
+        f"{user_prompt}\n"
+        "<|eot_id|>"
+        "<|start_header_id|>assistant<|end_header_id|>\n"
     )
-    conversation = [
-        {
-            "role": "user",
-            "content": [{"text": f"You are a precise code review assistant. Return ONLY JSON.\n\n{prompt_text}"}]
-        }
-    ]
-    try:
-        response = bedrock_client.converse(
-            modelId=model_id,
-            messages=conversation,
-            inferenceConfig={
-                "maxTokens": 4000,
-                "temperature": 0.2,
-                "topP": 0.9
-            }
-        )
-        
-        # Extract response text
-        response_text = response["output"]["message"]["content"][0]["text"]
-        
-        # Try to parse as JSON
-        try:
-            return json.loads(response_text)
-        except json.JSONDecodeError:
-            # If not valid JSON, wrap in a basic structure
-            logger.warning(f"Non-JSON response from Bedrock: {response_text}")
-            return {
-                "summary": response_text,
-                "findings": []
-            }
-        
-    except Exception as e:
-        logger.error(f"Error calling Bedrock: {e}")
-        raise
+
 
 def build_files_table(files: list[dict]) -> str:
     return (
@@ -335,6 +626,7 @@ def build_files_table(files: list[dict]) -> str:
         )
         or "(no files parsed)"
     )
+
 
 def build_snippets_block(snippets: list[dict]) -> str:
     if not snippets:
@@ -355,6 +647,7 @@ def build_snippets_block(snippets: list[dict]) -> str:
         blocks.append("\n".join(parts))
 
     return "\n".join(blocks)
+
 
 async def main():
     conn = await aio_pika.connect_robust(Config.RABBITMQ_URL)
@@ -383,6 +676,8 @@ async def main():
             pass
 
     await stop_event.wait()
+
+    await redis_client.close()
     await conn.close()
 
 

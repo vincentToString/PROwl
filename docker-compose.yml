@@ -33,6 +33,19 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    command: redis-server --appendonly yes
 
   intake:
     build:
@@ -48,6 +61,7 @@ services:
       - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
       - GITHUB_PRIVATE_KEY_PATH=/app/github-app-private-key.pem
       - SLACK_TOKEN=${SLACK_TOKEN}
+      - REDIS_URL=redis://redis:6379
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -74,6 +88,11 @@ services:
       - LLM_TIMEOUT=${LLM_TIMEOUT:-20}
       - MAX_FILES_FOR_SNIPPETS=${MAX_FILES_FOR_SNIPPETS:-3}
       - MAX_LINES_PER_FILE=${MAX_LINES_PER_FILE:-120}
+      - REDIS_URL=redis://redis:6379
+      - AWS_REGION=${AWS_REGION}
+      - BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -136,3 +155,4 @@ services:
 volumes:
   postgres_data:
   rabbitmq_data:
+  redis_data:

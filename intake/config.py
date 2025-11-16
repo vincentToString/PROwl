@@ -6,6 +6,10 @@ load_dotenv()
 
 class Config:
     RABBITMQ_URL = os.getenv('RABBITMQ_URL')
+
+    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+    DIFF_TTL = int(os.getenv("DIFF_TTL", "3600"))
+
     GITHUB_APP_ID = os.getenv('GITHUB_APP_ID')
     GITHUB_PRIVATE_KEY_PATH = os.getenv('GITHUB_PRIVATE_KEY_PATH', './github-app-private-key.pem')
     GITHUB_INSTALLATION_ID = os.getenv('GITHUB_INSTALLATION_ID')
