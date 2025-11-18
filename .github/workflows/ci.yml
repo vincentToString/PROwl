@@ -32,14 +32,19 @@ jobs:
 
       - name: Install dependencies
         run: |
+          uv venv
           uv pip install ./${{ matrix.service }}[dev]
           uv pip install ruff mypy
 
       - name: Run ruff
-        run: ruff check ./${{ matrix.service }}
+        run: |
+          source .venv/bin/activate
+          ruff check ./${{ matrix.service }}
 
       - name: Run mypy
-        run: mypy ./${{ matrix.service }}
+        run: |
+          source .venv/bin/activate
+          mypy ./${{ matrix.service }}
 
   test:
     runs-on: ubuntu-latest
@@ -60,10 +65,14 @@ jobs:
           version: ${{ env.UV_VERSION }}
 
       - name: Install dependencies
-        run: uv pip install ./${{ matrix.service }}[dev]
+        run: |
+          uv venv
+          uv pip install ./${{ matrix.service }}[dev]
 
       - name: Run tests
-        run: pytest ./${{ matrix.service }}
+        run: |
+          source .venv/bin/activate
+          pytest ./${{ matrix.service }}
 
   compose-smoke:
     runs-on: ubuntu-latest
