@@ -10,3 +10,10 @@ dependencies = [
     "dotenv>=0.9.9",
     "pyjwt[crypto]>=2.10.1",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+]

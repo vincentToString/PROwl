@@ -1,0 +1,159 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 5 * * 1"
+
+env:
+  PYTHON_VERSION: "3.11"
+  UV_VERSION: "0.4.26"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [intake, ai_service, outbound]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          uv venv
+          uv pip install ./${{ matrix.service }}[dev]
+          uv pip install ruff mypy
+
+      - name: Run ruff
+        run: |
+          source .venv/bin/activate
+          ruff check ./${{ matrix.service }}
+
+      - name: Run mypy
+        run: |
+          source .venv/bin/activate
+          mypy ./${{ matrix.service }}
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [intake, ai_service, outbound]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          uv venv
+          uv pip install ./${{ matrix.service }}[dev]
+
+      - name: Run tests
+        run: |
+          source .venv/bin/activate
+          pytest ./${{ matrix.service }}
+
+  compose-smoke:
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    env:
+      # RabbitMQ & Redis
+      RABBITMQ_URL: amqp://admin:password@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379
+      DIFF_TTL: "3600"
+
+      # GitHub
+      GITHUB_WEBHOOK_SECRET: "ci-secret"
+      GITHUB_APP_ID: "2021314"
+      GITHUB_PRIVATE_KEY_PATH: "pr-owl-bot.2025-09-26.private-key.pem"
+      GITHUB_INSTALLATION_ID: "89535753"
+
+      # Slack
+      SLACK_TOKEN: "ci-fake-slack-token"
+
+      # OpenRouter
+      OPENROUTER_API_KEY: "ci-fake-openrouter-key"
+      OPENROUTER_BASE: "https://openrouter.ai/api/v1"
+      MODEL: "meta-llama/llama-3.2-3b-instruct:free"
+      LLM_TIMEOUT: "20"
+      MAX_FILES_FOR_SNIPPETS: "15"
+      MAX_LINES_PER_FILE: "200"
+
+      # AWS
+      AWS_ACCESS_KEY_ID: "ci-fake-aws-key"
+      AWS_SECRET_ACCESS_KEY: "ci-fake-aws-secret"
+      AWS_REGION: "us-east-2"
+      BEDROCK_MODEL_ID: "meta.llama3-3-70b-instruct-v1:0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create dummy GitHub private key
+        run: |
+          ssh-keygen -t rsa -b 4096 -f pr-owl-bot.2025-09-26.private-key.pem -N "" -q -C "ci-dummy-key"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build services
+        run: docker compose build
+
+      - name: Start services
+        run: docker compose up -d
+
+      - name: Wait for services to be healthy
+        run: |
+          curl --retry 10 --retry-connrefused --retry-delay 3 \
+            http://localhost:8000/health || exit 1
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down --volumes --remove-orphans
+
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
