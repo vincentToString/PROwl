@@ -86,3 +86,48 @@ class HealthResponse(BaseModel):
     status: str
     timestamp: datetime
     service: str
+
+
+# Vector Index Schemas
+
+class VectorIngestResponse(BaseModel):
+    """Response schema for vector index document ingestion."""
+
+    document_id: str
+    chunks_created: int
+    duration_seconds: float
+    status: str
+
+
+class VectorQueryRequest(BaseModel):
+    """Request schema for vector index query."""
+
+    query: str = Field(..., description="Search query")
+    top_k: int = Field(5, ge=1, le=50, description="Number of results to return")
+
+
+class VectorChunkResult(BaseModel):
+    """Chunk result in vector query response."""
+
+    chunk_id: str
+    content: str
+    score: float
+    document_id: Optional[str]
+    document_title: Optional[str]
+
+
+class VectorQueryResponse(BaseModel):
+    """Response schema for vector index query."""
+
+    query: str
+    chunks: List[VectorChunkResult]
+
+
+class VectorDocumentResponse(BaseModel):
+    """Response schema for vector document retrieval."""
+
+    document_id: str
+    title: Optional[str]
+    metadata: Dict[str, Any]
+    chunks: List[Dict[str, Any]]
+    chunks_count: int

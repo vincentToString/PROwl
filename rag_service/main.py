@@ -8,19 +8,25 @@ from datetime import datetime
 
 from database import init_db, get_db
 from indexes.knowledge_graph_index import KnowledgeGraphIndexEngine
+from indexes.vector_index import VectorIndexEngine
 from schemas import (
     DocumentIngestRequest,
     DocumentIngestResponse,
     QueryRequest,
     QueryResponse,
     DocumentGraphResponse,
-    HealthResponse
+    HealthResponse,
+    VectorIngestResponse,
+    VectorQueryRequest,
+    VectorQueryResponse,
+    VectorDocumentResponse
 )
 from config import settings
 
 
-# Initialize index engine
+# Initialize index engines
 kg_index_engine = KnowledgeGraphIndexEngine()
+vector_index_engine = VectorIndexEngine()
 
 
 @asynccontextmanager
@@ -186,6 +192,127 @@ async def get_document_graph(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get document graph: {str(e)}"
+        )
+
+
+# Vector Index Endpoints
+
+@app.post(
+    "/api/v1/vector-index/ingest",
+    response_model=VectorIngestResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Vector Index"]
+)
+async def ingest_document_vector(
+    request: DocumentIngestRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Ingest a document into the vector index.
+
+    This endpoint:
+    1. Splits the document into chunks
+    2. Creates embeddings for semantic search
+    3. Stores everything in PostgreSQL
+
+    Args:
+        request: Document ingestion request
+        db: Database session
+
+    Returns:
+        Ingestion result with statistics
+    """
+    try:
+        result = await vector_index_engine.ingest_document(
+            db=db,
+            document_id=request.document_id,
+            content=request.content,
+            title=request.title,
+            metadata=request.metadata
+        )
+        return VectorIngestResponse(**result)
+    except Exception as e:
+        print(f"ERROR in ingest_document_vector: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to ingest document: {str(e)}"
+        )
+
+
+@app.post(
+    "/api/v1/vector-index/query",
+    response_model=VectorQueryResponse,
+    tags=["Vector Index"]
+)
+async def query_vector_index(
+    request: VectorQueryRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Query the vector index using semantic similarity.
+
+    This endpoint searches for semantically similar chunks.
+
+    Args:
+        request: Query request
+        db: Database session
+
+    Returns:
+        Query results with chunks and similarity scores
+    """
+    try:
+        result = await vector_index_engine.query_vector_index(
+            db=db,
+            query=request.query,
+            top_k=request.top_k
+        )
+        return VectorQueryResponse(**result)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to query vector index: {str(e)}"
+        )
+
+
+@app.get(
+    "/api/v1/vector-index/document/{document_id}",
+    response_model=VectorDocumentResponse,
+    tags=["Vector Index"]
+)
+async def get_document_chunks(
+    document_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get all chunks for a specific document from the vector index.
+
+    Args:
+        document_id: Document identifier
+        db: Database session
+
+    Returns:
+        Document with all chunks
+    """
+    try:
+        result = await vector_index_engine.get_document_chunks(
+            db=db,
+            document_id=document_id
+        )
+
+        if result is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document '{document_id}' not found"
+            )
+
+        return VectorDocumentResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get document chunks: {str(e)}"
         )
 
 

@@ -59,6 +59,13 @@ CHANGED FILES (filename +additions/-deletions)
 
 ---
 
+RELEVANT GUIDELINES & CONTEXT
+The following context was retrieved from the knowledge base based on the PR metadata and changed files. Use this to inform your review with project-specific standards and best practices.
+
+{{rag_context}}
+
+---
+
 DIFF SNIPPETS (added & deleted lines; up to 3 files)
 Each block starts with `--- file: <path>`, shows added lines prefixed with “+” and deleted lines prefixed with “-”.
 These snippets are the source of truth for your analysis. If a function in these snippets uses a value that is not defined in these snippets, report it.

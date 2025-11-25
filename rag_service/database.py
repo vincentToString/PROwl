@@ -109,6 +109,44 @@ class KGRelation(Base):
     )
 
 
+class VectorDocument(Base):
+    """Document table for vector index."""
+
+    __tablename__ = "vector_documents"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    document_id = Column(String(255), unique=True, nullable=False, index=True)
+    title = Column(String(512))
+    content = Column(Text, nullable=False)
+    doc_metadata = Column(JSON, default={})
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    chunks = relationship("VectorChunk", back_populates="document", cascade="all, delete-orphan")
+
+
+class VectorChunk(Base):
+    """Chunk table for vector index."""
+
+    __tablename__ = "vector_chunks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chunk_id = Column(String(255), unique=True, nullable=False, index=True)
+    document_id = Column(Integer, ForeignKey("vector_documents.id", ondelete="CASCADE"), nullable=False)
+    content = Column(Text, nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    embedding = Column(JSON)  # Store as JSON array for pgvector compatibility
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    document = relationship("VectorDocument", back_populates="chunks")
+
+    __table_args__ = (
+        Index("idx_vector_chunk_document", "document_id", "chunk_index"),
+    )
+
+
 # Async engine and session
 engine = create_async_engine(
     settings.async_database_url,

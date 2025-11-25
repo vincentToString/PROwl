@@ -52,7 +52,7 @@ async def handle_message(message: AbstractIncomingMessage, channel):
             logger.error(f"Diff id not presented, failed")
             return
 
-        result = process_event(
+        result = await process_event(
             event_dict,
             prompt_path=Path(__file__).parent / "prompt.md",
             bedrock_model_id=Config.BEDROCK_MODEL_ID,
@@ -92,7 +92,7 @@ async def handle_message(message: AbstractIncomingMessage, channel):
         )
 
 
-def process_event(
+async def process_event(
     event_dict: dict,
     *,
     prompt_path: Path,
@@ -119,8 +119,11 @@ def process_event(
         f"for {event.repo_name} PR#{event.pr_number}"
     )
 
+    # Fetch RAG context
+    rag_context = await fetch_rag_context(files, event.pr_title, event.pr_body or "")
+
     prompt_template = load_prompt_template(prompt_path)
-    prompt = render_prompt(prompt_template, event, files, snippets)
+    prompt = render_prompt(prompt_template, event, files, snippets, rag_context)
     logger.info(prompt)
     llm_response = call_bedrock(
         prompt,
@@ -419,6 +422,65 @@ def parse_compressed_diff(
     return files, snippets
 
 
+async def fetch_rag_context(
+    files: list[dict], pr_title: str, pr_body: str = ""
+) -> list[dict]:
+
+    if not Config.RAG_ENABLED:
+        logger.info("RAG is disabled, skipping context retrieval")
+        return []
+
+    try:
+        # Build query from PR context
+        languages = set(f.get("language", "").lower() for f in files if f.get("language"))
+        languages.discard("")
+        languages.discard("unknown")
+
+        # Check if any critical files
+        has_critical = any(f.get("is_critical", False) for f in files)
+
+        # Build contextual query
+        query_parts = [pr_title]
+        if pr_body:
+            query_parts.append(pr_body[:200])  # First 200 chars of description
+        if languages:
+            query_parts.append(f"languages: {', '.join(languages)}")
+        if has_critical:
+            query_parts.append("security critical")
+
+        query = " ".join(query_parts)
+
+        logger.info(f"RAG query: {query[:100]}... (languages: {languages})")
+
+        # Call RAG service
+        async with httpx.AsyncClient(timeout=Config.RAG_TIMEOUT) as client:
+            response = await client.post(
+                f"{Config.RAG_SERVICE_URL}/api/v1/vector-index/query",
+                json={"query": query, "top_k": Config.RAG_TOP_K},
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                chunks = data.get("chunks", [])
+                logger.info(
+                    f"RAG retrieved {len(chunks)} chunks (top scores: "
+                    f"{[round(c.get('score', 0), 2) for c in chunks[:3]]})"
+                )
+                return chunks
+            else:
+                logger.warning(
+                    f"RAG service returned {response.status_code}: {response.text[:100]}"
+                )
+                return []
+
+    except httpx.TimeoutException:
+        logger.warning(f"RAG service timeout after {Config.RAG_TIMEOUT}s")
+        return []
+    except Exception as e:
+        logger.error(f"RAG service error: {e}")
+        return []
+
+
 def load_prompt_template(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
@@ -431,7 +493,9 @@ def render_prompt(
     event: PullRequestData,
     files: list[dict],
     snippets: list[dict],
+    rag_context: list[dict] = None,
 ) -> str:
+    rag_context = rag_context or []
     return (
         prompt_template.replace("{{repo_name}}", event.repo_name)
         .replace("{{pr_number}}", str(event.pr_number))
@@ -440,6 +504,7 @@ def render_prompt(
         .replace("{{pr_body}}", (event.pr_body or "")[:1000])
         .replace("{{files_table}}", build_files_table(files))
         .replace("{{snippets}}", build_snippets_block(snippets))
+        .replace("{{rag_context}}", build_rag_context_block(rag_context))
     )
 
 
@@ -647,6 +712,26 @@ def build_snippets_block(snippets: list[dict]) -> str:
         blocks.append("\n".join(parts))
 
     return "\n".join(blocks)
+
+
+def build_rag_context_block(rag_chunks: list[dict]) -> str:
+    if not rag_chunks:
+        return "(no additional context available)"
+
+    blocks = []
+    for idx, chunk in enumerate(rag_chunks, 1):
+        content = chunk.get("content", "").strip()
+        score = chunk.get("score", 0.0)
+        doc_title = chunk.get("document_title", "")
+
+        if content:
+            header = f"[{idx}] Relevance: {score:.2f}"
+            if doc_title:
+                header += f" | Source: {doc_title}"
+
+            blocks.append(f"{header}\n{content}")
+
+    return "\n\n".join(blocks) if blocks else "(no additional context available)"
 
 
 async def main():

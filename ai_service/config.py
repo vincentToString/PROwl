@@ -22,3 +22,9 @@ class Config:
     LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "20"))
     MAX_FILES = int(os.getenv("MAX_FILES_FOR_SNIPPETS", "3"))
     MAX_LINES = int(os.getenv("MAX_LINES_PER_FILE", "120"))
+
+    # RAG service settings
+    RAG_SERVICE_URL = os.getenv("RAG_SERVICE_URL", "http://localhost:8001")
+    RAG_ENABLED = os.getenv("RAG_ENABLED", "true").lower() == "true"
+    RAG_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
+    RAG_TIMEOUT = int(os.getenv("RAG_TIMEOUT", "5"))
