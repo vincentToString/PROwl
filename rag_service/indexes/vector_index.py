@@ -261,6 +261,8 @@ class VectorIndexEngine:
             (chunk, cosine_similarity(query_embedding, chunk.embedding or []))
             for chunk in chunks
         ]
+        # Filter for positive similarity scores only
+        chunk_scores = [(chunk, score) for chunk, score in chunk_scores if score > 0]
         chunk_scores.sort(key=lambda x: x[1], reverse=True)
         top_chunks = chunk_scores[:top_k]
 

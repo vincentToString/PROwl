@@ -12,6 +12,7 @@ class PullRequestData(BaseModel):
     repo_name: str
     repo_url: str
     created_at: str
+    owl_level: str
 
     pr_data: Optional[Dict[str, Any]] = None
 

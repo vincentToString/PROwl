@@ -43,11 +43,10 @@ async def handle_github_webhook(
         return {"message": f"PR action '{webhook_data.get('action')}' ignored"}
     
     owl_level = extract_owl_labels(webhook_data)
-
-    if owl_level == "owl-ignore":
+    logger.info(owl_level)
+    if owl_level == "owl_ignore":
         return {"message": f"PR ignored as per requested"}
     
-    #TODO: Other level handling here
 
     repo_name = webhook_data["repository"]["full_name"]
     pr_number = webhook_data["number"]
@@ -75,7 +74,6 @@ async def handle_github_webhook(
         "repo_name": repo_name,
         "pr_number": pr_number,
         "head_sha": head_sha,
-        "owl_level": owl_level,
         
         # PR info
         "pr_title": pr_meta["title"],
@@ -102,6 +100,7 @@ async def handle_github_webhook(
         repo_name=webhook_data["repository"]["full_name"],
         repo_url=webhook_data["repository"]["html_url"],
         created_at=webhook_data["pull_request"]["created_at"],
+        owl_level=owl_level,
         diff_id = diff_id
     )
     channel = await request.app.state.rabbitmq_connection.channel()
@@ -212,20 +211,19 @@ def extract_owl_labels(webhook_data: dict) -> str:
     Extract the PR review level from labels
     
     Returns:
-        Single owl level string (e.g., "owl-quick", "owl-ignore")
-        Returns "owl-standard" if no owl label found (default)
+        Single owl level string (e.g., "owl_quick", "owl_ignore")
+        Returns "owl_standard" if no owl label found (default)
     
     Priority order (if multiple labels):
-        1. owl-ignore (highest - skip review)
-        2. owl-expert
-        3. owl-deep
-        4. owl-standard
-        5. owl-quick
+        1. owl_ignore (highest - skip review)
+        2. owl_deep (TODO)
+        3. owl_standard
+        4. owl_quick
     """
     labels = webhook_data.get("pull_request", {}).get("labels", [])
     
     if labels is None:
-        return "owl-quick"  # Default
+        return "owl_quick"  # Default
     
     # Extract all owl labels
     owl_labels = set()
@@ -234,19 +232,17 @@ def extract_owl_labels(webhook_data: dict) -> str:
             continue
         
         name = label.get("name", "")
-        if name.startswith("owl-"):
+        if name.startswith("owl_"):
             owl_labels.add(name)
     
-    if "owl-ignore" in owl_labels:
-        return "owl-ignore"
-    elif "owl-expert" in owl_labels:
-        return "owl-expert"
-    elif "owl-deep" in owl_labels:
-        return "owl-deep"
-    elif "owl-standard" in owl_labels:
-        return "owl-standard"
-    elif "owl-quick" in owl_labels:
-        return "owl-quick"
+    if "owl_ignore" in owl_labels:
+        return "owl_ignore"
+    elif "owl_deep" in owl_labels:
+        return "owl_deep"
+    elif "owl_standard" in owl_labels:
+        return "owl_standard"
+    elif "owl_quick" in owl_labels:
+        return "owl_quick"
     else:
-        return "owl-quick"  
+        return "owl_quick"  
 

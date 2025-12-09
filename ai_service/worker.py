@@ -118,11 +118,11 @@ async def process_event(
         f"Parsed {len(files)} files and {len(snippets)} snippets "
         f"for {event.repo_name} PR#{event.pr_number}"
     )
-
-    # Fetch RAG context
-    rag_context = await fetch_rag_context(files, event.pr_title, event.pr_body or "")
-
     prompt_template = load_prompt_template(prompt_path)
+    rag_context = ""
+    if event.owl_level == "owl_standard":
+        # Fetch RAG context
+        rag_context = await fetch_rag_context(files, event.pr_title, event.pr_body or "")
     prompt = render_prompt(prompt_template, event, files, snippets, rag_context)
     logger.info(prompt)
     llm_response = call_bedrock(
@@ -161,6 +161,7 @@ async def process_event(
             "provider": "bedrock",
             "model": bedrock_model_id,
             "region": aws_region,
+            "owl_level": event.owl_level
         },
     )
 
@@ -574,7 +575,7 @@ def call_bedrock(
     region: str,
     timeout_s: int,
     temperature: float = 0.5,
-    max_tokens: int = 1024,
+    max_tokens: int = 4096,
 ) -> dict:
     if not model_id:
         raise RuntimeError("BEDROCK_MODEL_ID is not configured")
@@ -589,12 +590,32 @@ def call_bedrock(
         ),
     )
 
-    body = {
-        "prompt": build_meta_prompt(prompt_text),
-        "max_gen_len": max_tokens,
-        "temperature": temperature,
-        "top_p": 0.9,
-    }
+    # Detect model provider and format request accordingly
+    # Support both direct model IDs (anthropic.) and inference profiles (us.anthropic., global.anthropic.)
+    is_anthropic = model_id.startswith("anthropic.") or "anthropic" in model_id
+
+    if is_anthropic:
+        # Claude/Anthropic format using Messages API
+        body = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "system": BEDROCK_SYSTEM_PROMPT,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt_text
+                }
+            ]
+        }
+    else:
+        # Meta Llama format
+        body = {
+            "prompt": build_meta_prompt(prompt_text),
+            "max_gen_len": max_tokens,
+            "temperature": temperature,
+            "top_p": 0.9,
+        }
 
     try:
         response = client.invoke_model(
@@ -610,11 +631,19 @@ def call_bedrock(
     payload_bytes = response["body"].read()
     payload = json.loads(payload_bytes)
 
-    completion_text = (
-        payload.get("generation")
-        or payload.get("output_text")
-        or payload.get("completion")
-    )
+    # Parse response based on provider
+    if is_anthropic:
+        # Claude response format
+        content_blocks = payload.get("content", [])
+        completion_text = content_blocks[0].get("text", "") if content_blocks else ""
+    else:
+        # Meta Llama response format
+        completion_text = (
+            payload.get("generation")
+            or payload.get("output_text")
+            or payload.get("completion")
+        )
+
     if not completion_text:
         outputs = payload.get("outputs") or []
         if outputs:
@@ -628,12 +657,125 @@ def call_bedrock(
 
     try:
         completion_text = completion_text.strip()
+        # Remove markdown code fences if present
         completion_text = re.sub(r'^```(?:json)?\s*\n?', '', completion_text)
         completion_text = re.sub(r'\n?```\s*$', '', completion_text)
-        
-        return json.loads(completion_text)
+
+        # Try to parse the JSON
+        try:
+            return json.loads(completion_text)
+        except json.JSONDecodeError as parse_error:
+            # Claude often generates literal newlines in JSON strings instead of \n
+            # Try to fix by using a more lenient JSON parser or fixing common issues
+            logger.warning(
+                "Initial JSON parse failed (error: %s), attempting repair...",
+                str(parse_error)
+            )
+
+            # Attempt to repair: Fix unescaped newlines within JSON string values
+            # This is a heuristic approach - look for patterns like: "text\nmore text"
+            # and replace with: "text\\nmore text"
+            # Log the problematic JSON for debugging
+            logger.error(
+                "JSON parse failed at char %s. First 1000 chars:\n%s\n\nLast 1000 chars:\n%s",
+                str(parse_error).split("char ")[-1].split(")")[0] if "char" in str(parse_error) else "unknown",
+                completion_text[:1000],
+                completion_text[-1000:] if len(completion_text) > 1000 else ""
+            )
+
+            # Save full response to temp file for debugging
+            try:
+                with open("/tmp/bedrock_response.json", "w") as f:
+                    f.write(completion_text)
+                logger.info("Saved full response to /tmp/bedrock_response.json")
+            except Exception:
+                pass
+
+            try:
+                # Try a more aggressive approach: escape ALL literal newlines, tabs, etc. in the entire response
+                # before trying to parse JSON strings
+                logger.info("Attempting aggressive JSON repair...")
+
+                # First, try to find the JSON object boundaries
+                # Claude might have added text before or after the JSON
+                start_idx = completion_text.find('{')
+                end_idx = completion_text.rfind('}')
+
+                if start_idx == -1 or end_idx == -1:
+                    raise ValueError("No JSON object found in response")
+
+                json_text = completion_text[start_idx:end_idx + 1]
+
+                # Now repair the JSON by properly escaping strings
+                # We need to be more careful - only escape newlines that are inside string values
+                # Strategy: Find each string value and escape special characters within it
+
+                repaired = []
+                i = 0
+                in_string = False
+                escape_next = False
+
+                while i < len(json_text):
+                    char = json_text[i]
+
+                    if escape_next:
+                        # We're after a backslash - keep the char as-is
+                        repaired.append(char)
+                        escape_next = False
+                        i += 1
+                        continue
+
+                    if char == '\\':
+                        # Start of escape sequence
+                        repaired.append(char)
+                        escape_next = True
+                        i += 1
+                        continue
+
+                    if char == '"' and not escape_next:
+                        # Toggle string state (only if not escaped)
+                        repaired.append(char)
+                        in_string = not in_string
+                        i += 1
+                        continue
+
+                    if in_string:
+                        # Inside a string - escape special characters that aren't already escaped
+                        if char == '\n':
+                            repaired.append('\\')
+                            repaired.append('n')
+                        elif char == '\r':
+                            repaired.append('\\')
+                            repaired.append('r')
+                        elif char == '\t':
+                            repaired.append('\\')
+                            repaired.append('t')
+                        else:
+                            repaired.append(char)
+                    else:
+                        repaired.append(char)
+
+                    i += 1
+
+                repaired_text = ''.join(repaired)
+
+                # Save repaired version for debugging
+                try:
+                    with open("/tmp/bedrock_response_repaired.json", "w") as f:
+                        f.write(repaired_text)
+                    logger.info("Saved repaired response to /tmp/bedrock_response_repaired.json")
+                except Exception:
+                    pass
+
+                result = json.loads(repaired_text)
+                logger.info("Successfully parsed JSON after aggressive repair")
+                return result
+
+            except Exception as repair_error:
+                logger.error("All repair attempts failed: %s", str(repair_error))
+                raise RuntimeError(f"Bedrock completion was not valid JSON: {parse_error}") from parse_error
     except json.JSONDecodeError as exc:
-        logger.error("Bedrock completion was not valid JSON: %s", completion_text)
+        logger.error("Bedrock completion was not valid JSON: %s", completion_text[:1000])
         raise RuntimeError("Bedrock completion was not valid JSON") from exc
 
 
