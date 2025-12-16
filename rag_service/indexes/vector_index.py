@@ -1,4 +1,3 @@
-"""Vector Index Engine using LlamaIndex for document ingestion and querying."""
 import json
 import uuid
 from typing import List, Dict, Any, Optional
@@ -17,15 +16,7 @@ from config import settings
 
 
 class VectorIndexEngine:
-    """
-    Vector Index Engine using LlamaIndex that handles:
-    1. Document ingestion: raw document -> vector embeddings using LlamaIndex
-    2. Vector storage in PostgreSQL
-    3. Querying the vector index using LlamaIndex query engine
-    """
-
     def __init__(self):
-        """Initialize the vector index engine with LlamaIndex."""
         self.chunk_size = settings.kg_chunk_size
         self.chunk_overlap = settings.kg_chunk_overlap
 
@@ -61,25 +52,6 @@ class VectorIndexEngine:
         title: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """
-        Ingest a document into the vector index using LlamaIndex.
-
-        Steps:
-        1. Create LlamaIndex Document
-        2. Build VectorStoreIndex with automatic chunking and embedding
-        3. Store vector data in PostgreSQL
-        4. Cache the index for querying
-
-        Args:
-            db: Database session
-            document_id: Unique document identifier
-            content: Raw document content
-            title: Optional document title
-            metadata: Optional metadata
-
-        Returns:
-            Ingestion result with statistics
-        """
         start_time = datetime.utcnow()
 
         # Check if document already exists with eager loading
@@ -175,28 +147,10 @@ class VectorIndexEngine:
         }
 
     async def _get_embedding(self, text: str) -> List[float]:
-        """
-        Get embedding vector for text using hash-based approach.
-
-        Args:
-            text: Input text
-
-        Returns:
-            Embedding vector
-        """
         # Use hash-based embedding (no external dependencies needed)
         return self._generate_simple_embedding(text)
 
     def _generate_simple_embedding(self, text: str) -> List[float]:
-        """
-        Generate a simple hash-based embedding as fallback.
-
-        Args:
-            text: Input text
-
-        Returns:
-            Simple embedding vector
-        """
         import hashlib
 
         hash_obj = hashlib.sha256(text.encode())
@@ -224,17 +178,6 @@ class VectorIndexEngine:
         query: str,
         top_k: int = 5
     ) -> Dict[str, Any]:
-        """
-        Query the vector index using semantic similarity.
-
-        Args:
-            db: Database session
-            query: Search query
-            top_k: Number of top results to return
-
-        Returns:
-            Query results with chunks and similarity scores
-        """
         # Get query embedding
         query_embedding = await self._get_embedding(query)
 
@@ -288,16 +231,6 @@ class VectorIndexEngine:
         db: AsyncSession,
         document_id: str
     ) -> Optional[Dict[str, Any]]:
-        """
-        Get all chunks for a document.
-
-        Args:
-            db: Database session
-            document_id: Document identifier
-
-        Returns:
-            Document with all chunks
-        """
         # Get document
         result = await db.execute(
             select(VectorDocument).where(VectorDocument.document_id == document_id)

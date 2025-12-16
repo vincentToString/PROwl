@@ -1,4 +1,3 @@
-"""FastAPI application for RAG service."""
 import traceback
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,7 +30,6 @@ vector_index_engine = VectorIndexEngine()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan events for the application."""
     # Startup
     print("Initializing database...")
     await init_db()
@@ -63,7 +61,6 @@ app.add_middleware(
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint."""
     return HealthResponse(
         status="healthy",
         timestamp=datetime.utcnow(),
@@ -81,22 +78,6 @@ async def ingest_document(
     request: DocumentIngestRequest,
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Ingest a document into the knowledge graph index.
-
-    This endpoint:
-    1. Splits the document into chunks
-    2. Extracts entities and relations using LLM
-    3. Creates embeddings for semantic search
-    4. Stores everything in PostgreSQL
-
-    Args:
-        request: Document ingestion request
-        db: Database session
-
-    Returns:
-        Ingestion result with statistics
-    """
     try:
         result = await kg_index_engine.ingest_document(
             db=db,
@@ -124,21 +105,6 @@ async def query_knowledge_graph(
     request: QueryRequest,
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Query the knowledge graph.
-
-    This endpoint searches for:
-    1. Semantically similar chunks
-    2. Matching entities
-    3. Related entities and their relationships
-
-    Args:
-        request: Query request
-        db: Database session
-
-    Returns:
-        Query results with chunks, entities, and relations
-    """
     try:
         result = await kg_index_engine.query_knowledge_graph(
             db=db,
@@ -163,16 +129,6 @@ async def get_document_graph(
     document_id: str,
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Get the complete knowledge graph for a specific document.
-
-    Args:
-        document_id: Document identifier
-        db: Database session
-
-    Returns:
-        Document graph with all entities and relations
-    """
     try:
         result = await kg_index_engine.get_document_graph(
             db=db,
@@ -207,21 +163,6 @@ async def ingest_document_vector(
     request: DocumentIngestRequest,
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Ingest a document into the vector index.
-
-    This endpoint:
-    1. Splits the document into chunks
-    2. Creates embeddings for semantic search
-    3. Stores everything in PostgreSQL
-
-    Args:
-        request: Document ingestion request
-        db: Database session
-
-    Returns:
-        Ingestion result with statistics
-    """
     try:
         result = await vector_index_engine.ingest_document(
             db=db,
@@ -249,18 +190,6 @@ async def query_vector_index(
     request: VectorQueryRequest,
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Query the vector index using semantic similarity.
-
-    This endpoint searches for semantically similar chunks.
-
-    Args:
-        request: Query request
-        db: Database session
-
-    Returns:
-        Query results with chunks and similarity scores
-    """
     try:
         result = await vector_index_engine.query_vector_index(
             db=db,
@@ -284,16 +213,6 @@ async def get_document_chunks(
     document_id: str,
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Get all chunks for a specific document from the vector index.
-
-    Args:
-        document_id: Document identifier
-        db: Database session
-
-    Returns:
-        Document with all chunks
-    """
     try:
         result = await vector_index_engine.get_document_chunks(
             db=db,

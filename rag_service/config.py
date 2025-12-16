@@ -1,11 +1,8 @@
-"""Configuration settings for RAG service."""
 import os
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    """Application settings."""
-
     # Database
     postgres_host: str = os.getenv("POSTGRES_HOST", "localhost")
     postgres_port: int = int(os.getenv("POSTGRES_PORT", "5432"))
@@ -32,12 +29,10 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
-        """Get database URL."""
         return f"postgresql://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
 
     @property
     def async_database_url(self) -> str:
-        """Get async database URL."""
         return f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
 
 

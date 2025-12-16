@@ -1,12 +1,9 @@
-"""Pydantic schemas for API requests and responses."""
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime
 
 
 class DocumentIngestRequest(BaseModel):
-    """Request schema for document ingestion."""
-
     document_id: str = Field(..., description="Unique document identifier")
     content: str = Field(..., description="Raw document content")
     title: Optional[str] = Field(None, description="Document title")
@@ -14,8 +11,6 @@ class DocumentIngestRequest(BaseModel):
 
 
 class DocumentIngestResponse(BaseModel):
-    """Response schema for document ingestion."""
-
     document_id: str
     chunks_created: int
     entities_created: int
@@ -25,16 +20,12 @@ class DocumentIngestResponse(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    """Request schema for knowledge graph query."""
-
     query: str = Field(..., description="Search query")
     top_k: int = Field(5, ge=1, le=50, description="Number of results to return")
     include_relations: bool = Field(True, description="Include related entities")
 
 
 class ChunkResult(BaseModel):
-    """Chunk result in query response."""
-
     chunk_id: str
     content: str
     score: float
@@ -42,8 +33,6 @@ class ChunkResult(BaseModel):
 
 
 class EntityResult(BaseModel):
-    """Entity result in query response."""
-
     entity_id: str
     text: str
     type: str
@@ -51,8 +40,6 @@ class EntityResult(BaseModel):
 
 
 class RelationResult(BaseModel):
-    """Relation result in query response."""
-
     relation_id: str
     source: Optional[str]
     target: Optional[str]
@@ -61,8 +48,6 @@ class RelationResult(BaseModel):
 
 
 class QueryResponse(BaseModel):
-    """Response schema for knowledge graph query."""
-
     query: str
     chunks: List[ChunkResult]
     entities: List[EntityResult]
@@ -70,8 +55,6 @@ class QueryResponse(BaseModel):
 
 
 class DocumentGraphResponse(BaseModel):
-    """Response schema for document graph."""
-
     document_id: str
     title: Optional[str]
     metadata: Dict[str, Any]
@@ -81,8 +64,6 @@ class DocumentGraphResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """Health check response."""
-
     status: str
     timestamp: datetime
     service: str
@@ -91,8 +72,6 @@ class HealthResponse(BaseModel):
 # Vector Index Schemas
 
 class VectorIngestResponse(BaseModel):
-    """Response schema for vector index document ingestion."""
-
     document_id: str
     chunks_created: int
     duration_seconds: float
@@ -100,15 +79,11 @@ class VectorIngestResponse(BaseModel):
 
 
 class VectorQueryRequest(BaseModel):
-    """Request schema for vector index query."""
-
     query: str = Field(..., description="Search query")
     top_k: int = Field(5, ge=1, le=50, description="Number of results to return")
 
 
 class VectorChunkResult(BaseModel):
-    """Chunk result in vector query response."""
-
     chunk_id: str
     content: str
     score: float
@@ -117,15 +92,11 @@ class VectorChunkResult(BaseModel):
 
 
 class VectorQueryResponse(BaseModel):
-    """Response schema for vector index query."""
-
     query: str
     chunks: List[VectorChunkResult]
 
 
 class VectorDocumentResponse(BaseModel):
-    """Response schema for vector document retrieval."""
-
     document_id: str
     title: Optional[str]
     metadata: Dict[str, Any]

@@ -1,4 +1,3 @@
-"""Database models and connection management."""
 from sqlalchemy import Column, Integer, String, Text, DateTime, Float, ForeignKey, Index, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -10,8 +9,6 @@ Base = declarative_base()
 
 
 class KGDocument(Base):
-    """Document table for knowledge graph index."""
-
     __tablename__ = "kg_documents"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -27,8 +24,6 @@ class KGDocument(Base):
 
 
 class KGChunk(Base):
-    """Chunk table for knowledge graph index."""
-
     __tablename__ = "kg_chunks"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -49,8 +44,6 @@ class KGChunk(Base):
 
 
 class KGEntity(Base):
-    """Entity table for knowledge graph index."""
-
     __tablename__ = "kg_entities"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -78,8 +71,6 @@ class KGEntity(Base):
 
 
 class KGRelation(Base):
-    """Relation table for knowledge graph index."""
-
     __tablename__ = "kg_relations"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -110,8 +101,6 @@ class KGRelation(Base):
 
 
 class VectorDocument(Base):
-    """Document table for vector index."""
-
     __tablename__ = "vector_documents"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -127,8 +116,6 @@ class VectorDocument(Base):
 
 
 class VectorChunk(Base):
-    """Chunk table for vector index."""
-
     __tablename__ = "vector_chunks"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -164,13 +151,11 @@ AsyncSessionLocal = sessionmaker(
 
 
 async def init_db():
-    """Initialize database tables."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
 
 async def get_db():
-    """Get database session."""
     async with AsyncSessionLocal() as session:
         try:
             yield session

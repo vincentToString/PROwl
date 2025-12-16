@@ -1,4 +1,3 @@
-"""Knowledge Graph Index Engine using LlamaIndex for document ingestion and querying."""
 import json
 import uuid
 from typing import List, Dict, Any, Optional
@@ -18,15 +17,7 @@ from config import settings
 
 
 class KnowledgeGraphIndexEngine:
-    """
-    Knowledge Graph Index Engine using LlamaIndex that handles:
-    1. Document ingestion: raw document -> knowledge graph using LlamaIndex
-    2. Knowledge graph storage in PostgreSQL
-    3. Querying the knowledge base using LlamaIndex query engine
-    """
-
     def __init__(self):
-        """Initialize the knowledge graph index engine with LlamaIndex."""
         self.chunk_size = settings.kg_chunk_size
         self.chunk_overlap = settings.kg_chunk_overlap
         self.max_triplets = settings.kg_max_entities_per_chunk
@@ -63,25 +54,6 @@ class KnowledgeGraphIndexEngine:
         title: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """
-        Ingest a document into the knowledge graph index using LlamaIndex.
-
-        Steps:
-        1. Create LlamaIndex Document
-        2. Build KnowledgeGraphIndex with automatic triplet extraction
-        3. Store graph data in PostgreSQL
-        4. Cache the index for querying
-
-        Args:
-            db: Database session
-            document_id: Unique document identifier
-            content: Raw document content
-            title: Optional document title
-            metadata: Optional metadata
-
-        Returns:
-            Ingestion result with statistics
-        """
         start_time = datetime.utcnow()
 
         # Check if document already exists with eager loading
@@ -236,17 +208,6 @@ class KnowledgeGraphIndexEngine:
         }
 
     def _is_triplet_from_text(self, triplet: tuple, text: str) -> bool:
-        """
-        Check if a triplet likely came from the given text.
-        Simple heuristic: all triplet components should appear in text.
-
-        Args:
-            triplet: (subject, relation, object) tuple
-            text: Text to check against
-
-        Returns:
-            True if triplet likely from this text
-        """
         subj, rel, obj = triplet
         text_lower = text.lower()
         return (
@@ -255,28 +216,10 @@ class KnowledgeGraphIndexEngine:
         )
 
     async def _get_embedding(self, text: str) -> List[float]:
-        """
-        Get embedding vector for text using hash-based approach.
-
-        Args:
-            text: Input text
-
-        Returns:
-            Embedding vector
-        """
         # Use hash-based embedding (no external dependencies needed)
         return self._generate_simple_embedding(text)
 
     def _generate_simple_embedding(self, text: str) -> List[float]:
-        """
-        Generate a simple hash-based embedding as fallback.
-
-        Args:
-            text: Input text
-
-        Returns:
-            Simple embedding vector
-        """
         import hashlib
 
         hash_obj = hashlib.sha256(text.encode())
@@ -305,18 +248,6 @@ class KnowledgeGraphIndexEngine:
         top_k: int = 5,
         include_relations: bool = True
     ) -> Dict[str, Any]:
-        """
-        Query the knowledge graph using LlamaIndex query engine.
-
-        Args:
-            db: Database session
-            query: Search query
-            top_k: Number of top results to return
-            include_relations: Whether to include related entities
-
-        Returns:
-            Query results with entities, chunks, and relations
-        """
         # Get query embedding
         query_embedding = await self._get_embedding(query)
 
@@ -409,16 +340,6 @@ class KnowledgeGraphIndexEngine:
         db: AsyncSession,
         document_id: str
     ) -> Optional[Dict[str, Any]]:
-        """
-        Get the complete knowledge graph for a document.
-
-        Args:
-            db: Database session
-            document_id: Document identifier
-
-        Returns:
-            Document graph with all entities and relations
-        """
         # Get document
         result = await db.execute(
             select(KGDocument).where(KGDocument.document_id == document_id)
