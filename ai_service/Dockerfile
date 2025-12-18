@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen
 
-COPY . .
+# Put your code under /app/ai_service so `import ai_service...` works
+COPY . ./ai_service
 
-CMD ["python", "-m", "worker"]
+CMD ["python", "-m", "ai_service.worker"]
