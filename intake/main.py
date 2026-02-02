@@ -3,19 +3,19 @@ from contextlib import asynccontextmanager
 from aio_pika import connect_robust, Message, DeliveryMode, ExchangeType
 from pydantic import BaseModel
 from typing import Optional
-import json
-import hmac
-import hashlib
-import os
 import logging
 from dotenv import load_dotenv
-
+import os
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from aio_pika import connect_robust, ExchangeType
 import logging
 from intake.config import Config
 from intake.webhooks import router as webhook_router
+from .heartbeat import HeartbeatEmitter
+from .redis_client import RedisClient
+
+
 
 
 load_dotenv()
@@ -60,8 +60,31 @@ async def lifespan(app: FastAPI):
         await github_queue.bind(out_exchange)
     finally: 
         await setup_channel.close()
+    
+    redis_client = RedisClient(Config.REDIS_URL)
+    app.state.heartbeat = HeartbeatEmitter(
+        redis_client,
+        service_name="intake",
+        instance_id=Config.INSTANCE_ID,
+        interval_s=Config.HEARTBEAT_INTERVAL_SECONDS,
+        ttl_s=Config.HEARTBEAT_TTL_SECONDS,
+        metadata={
+            "port": 8000,
+            "env": os.getenv("ENV", "dev"),
+        },
+    )
+    await app.state.heartbeat.start()
 
     yield
+
+    logger.info("Stopping heartbeat...")
+    hb = getattr(app.state, "heartbeat", None)
+    if hb:
+        await redis_client.deregister_instance("intake", hb.instance_id)
+        await hb.stop()
+
+    logger.info("Closing Redis connection...")
+    await redis_client.close()
 
     logger.info("Closing RabbitMQ connection")
     await app.state.rabbitmq_connection.close()

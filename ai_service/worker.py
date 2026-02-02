@@ -20,6 +20,9 @@ import boto3
 from botocore.config import Config as BotoCoreConfig
 from botocore.exceptions import BotoCoreError, ClientError
 import re
+from .heartbeat import WorkerHealthState, heartbeat_loop
+import socket
+
 
 
 logging.basicConfig(
@@ -875,10 +878,27 @@ def build_rag_context_block(rag_chunks: list[dict]) -> str:
 
     return "\n\n".join(blocks) if blocks else "(no additional context available)"
 
+def _default_instance_id() -> str:
+    return os.getenv("HOSTNAME") or socket.gethostname() or "unknown"
 
 async def main():
+    state =  WorkerHealthState()
+    instance_id = _default_instance_id()
+
+    hb_task = asyncio.create_task(
+        heartbeat_loop(
+            redis=redis_client,
+            state=state,
+            service_name="ai_service",
+            instance_id=instance_id,
+            interval_s=10,
+        ), 
+        name=f"heartbeat:ai_service:{instance_id}",
+
+    )
     conn = await aio_pika.connect_robust(Config.RABBITMQ_URL)
     channel = await conn.channel()
+    await state.set_connected(True)
 
     await channel.set_qos(prefetch_count=1)
 
@@ -887,7 +907,15 @@ async def main():
     stop_event = asyncio.Event()
 
     async def consumer(msg: AbstractIncomingMessage):
-        await handle_message(msg, channel)
+        await state.on_msg_start()
+        try:
+            await handle_message(msg, channel)
+            await state.on_msg_ok()
+        except Exception as e:
+            logger.exception("Error processing message: %s", e)
+            await state.on_msg_error()
+        finally:
+            await state.on_msg_done()
 
     await pr_queue.consume(consumer)
     logger.info("AI service consuming from pr_review queue")
@@ -903,6 +931,12 @@ async def main():
             pass
 
     await stop_event.wait()
+    hb_task.cancel()
+    try:
+        await hb_task
+    except asyncio.CancelledError:
+        pass
+
 
     await redis_client.close()
     await conn.close()

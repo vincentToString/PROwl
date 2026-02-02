@@ -11,8 +11,12 @@ from aio_pika.abc import AbstractIncomingMessage
 import aiohttp
 import jwt
 from dotenv import load_dotenv
+from outbound.worker_heartbeat import WorkerHealthState, heartbeat_loop, _default_instance_id
+from outbound.redis_client import RedisClient
 
-# Formatting helper functions (no dependencies on ai_service)
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+
 def format_finding_markdown(finding: dict) -> str:
     """Format a single finding as markdown for GitHub comments."""
     severity_emoji = {
@@ -203,47 +207,43 @@ github_auth = GitHubAppAuth(
 )
 
 
+
+
 # ----------------------
 # Message Handlers
 # ----------------------
 
 async def handle_github(msg: AbstractIncomingMessage):
     """Handle PR review result and post to GitHub as a comment."""
-    async with msg.process(ignore_processed=True):  # auto-ack on success
-        try:
-            data = json.loads(msg.body.decode("utf-8"))
+    async with msg.process(requeue=False):
+        data = json.loads(msg.body.decode("utf-8"))
 
-            # No dependency on ai_service models - work directly with dict
-            repo = data.get("repo_name")
-            pr = data.get("pr_number")
+        # No dependency on ai_service models - work directly with dict
+        repo = data.get("repo_name")
+        pr = data.get("pr_number")
 
-            # Use standalone formatting function
-            review_body = format_github_comment(data)
+        # Use standalone formatting function
+        review_body = format_github_comment(data)
 
-            log.info(f"Posting formatted review to GitHub PR#{pr} in {repo}")
-            log.debug(f"Review preview:\n{review_body[:500]}...")
+        log.info(f"Posting formatted review to GitHub PR#{pr} in {repo}")
+        log.debug(f"Review preview:\n{review_body[:500]}...")
 
-            # Get fresh installation token
-            token = await github_auth.get_installation_token()
+        # Get fresh installation token
+        token = await github_auth.get_installation_token()
 
-            url = f"https://api.github.com/repos/{repo}/issues/{pr}/comments"
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github.v3+json",
-                "User-Agent": "PR-Owl-Bot"
-            }
+        url = f"https://api.github.com/repos/{repo}/issues/{pr}/comments"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "PR-Owl-Bot"
+        }
 
-            async with aiohttp.ClientSession() as session:
-                resp = await session.post(url, headers=headers, json={"body": review_body})
-                if resp.status != 201:
-                    text = await resp.text()
-                    log.error(f"GitHub API error {resp.status}: {text}")
-                else:
-                    log.info(f"Successfully posted review comment to PR#{pr}")
-
-        except Exception as e:
-            log.error("Failed to handle GitHub message: %s", e, exc_info=True)
-            await msg.nack(requeue=False)  # DLQ should capture
+        async with aiohttp.ClientSession() as session:
+            resp = await session.post(url, headers=headers, json={"body": review_body})
+            if resp.status != 201:
+                text = await resp.text()
+                log.error(f"GitHub API error {resp.status}: {text}")
+                raise RuntimeError(f"GitHub API error {resp.status}")
 
 
 # async def handle_slack(msg: AbstractIncomingMessage):
@@ -277,14 +277,52 @@ async def handle_github(msg: AbstractIncomingMessage):
 # ----------------------
 
 async def main():
+    state = WorkerHealthState()
+    redis_client = RedisClient(REDIS_URL)
+    instance_id = _default_instance_id()
+
+    hb_task = asyncio.create_task(
+        heartbeat_loop(
+            redis=redis_client,
+            state=state,
+            service_name="outbound",
+            instance_id=instance_id,
+            interval_s=5,
+            ttl_s=15,
+            max_errors=10,
+            max_stuck_s=120,
+            metadata={
+                "queues": ["github_comments", "slack_msgs"],
+                "worker": "outbound",
+            },
+        ),
+        name=f"heartbeat:outbound:{instance_id}",
+    )
+
     conn = await connect_robust(RABBITMQ_URL)
     ch = await conn.channel()
     await ch.set_qos(prefetch_count=5)
 
+    await state.set_connected(True)
+
     github_q = await ch.declare_queue("github_comments", durable=True)
     slack_q = await ch.declare_queue("slack_msgs", durable=True)
 
-    await github_q.consume(handle_github)
+    # ----------------------
+    # Github Wrapper
+    # ----------------------
+    async def github_consumer(msg: AbstractIncomingMessage):
+        await state.on_msg_start()
+        try:
+            await handle_github(msg)
+            await state.on_msg_ok()
+        except Exception:
+            await state.on_msg_error()
+            raise
+        finally:
+            await state.on_msg_done()
+
+    await github_q.consume(github_consumer)
     # await slack_q.consume(handle_slack)
 
     log.info("Outbound worker consuming from github_comments and slack_msgs queues...")
@@ -302,6 +340,14 @@ async def main():
             pass
 
     await stop_event.wait()
+
+    hb_task.cancel()
+    try:
+        await hb_task
+    except asyncio.CancelledError:
+        pass
+
+    await redis_client.close()
     await conn.close()
 
 

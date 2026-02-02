@@ -51,9 +51,8 @@ services:
     build:
       context: ./intake
       dockerfile: Dockerfile
-    container_name: intake
     ports:
-      - "8000:8000"
+      - "8000"
     environment:
       - RABBITMQ_URL=amqp://admin:password@rabbitmq:5672/
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
@@ -119,6 +118,7 @@ services:
       - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
       - GITHUB_PRIVATE_KEY_PATH=/app/github-app-private-key.pem
       - SLACK_TOKEN=${SLACK_TOKEN}
+      - REDIS_URL=redis://redis:6379
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -157,6 +157,36 @@ services:
     restart: unless-stopped
     volumes:
       - ./rag_service:/app/rag_service
+
+  dashboard:
+    build:
+      context: ./dash/api
+      dockerfile: Dockerfile
+    container_name: dashboard
+    ports:
+      - "8003:8003"
+    environment:
+      - SERVICE_HOST=0.0.0.0
+      - SERVICE_PORT=8003
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=prowl_user
+      - POSTGRES_PASSWORD=prowl_password
+      - POSTGRES_DB=prowl_db
+      - RABBITMQ_URL=amqp://admin:password@rabbitmq:5672/
+      - RABBITMQ_MANAGEMENT_URL=http://rabbitmq:15672
+      - REDIS_URL=redis://redis:6379
+      - METRICS_REFRESH_INTERVAL=5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - ./dash/api:/app
 
 volumes:
   postgres_data:
